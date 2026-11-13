@@ -1,0 +1,118 @@
+package com.heartlink.app
+
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
+import androidx.health.services.client.HealthServices
+import androidx.health.services.client.MeasureCallback
+import androidx.health.services.client.data.Availability
+import androidx.health.services.client.data.DataPointContainer
+import androidx.health.services.client.data.DataType
+import androidx.health.services.client.data.DeltaDataType
+import com.heartlink.shared.HeartRepository
+import com.heartlink.shared.Identity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/**
+ * Measures heart rate live for a short while because the partner is looking right now.
+ * Each new request (relayed by the phone every ~30 s while the partner's screen is open)
+ * extends the window; it stops [WINDOW_MS] after the last one.
+ */
+class LiveHeartService : Service() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var stopJob: Job? = null
+    private var measuring = false
+
+    private val callback = object : MeasureCallback {
+        override fun onAvailabilityChanged(dataType: DeltaDataType<*, *>, availability: Availability) = Unit
+
+        override fun onDataReceived(data: DataPointContainer) {
+            val value = data.getData(DataType.HEART_RATE_BPM).lastOrNull()?.value ?: return
+            if (value <= 0.0) return
+            val session = Identity.get(this@LiveHeartService) ?: return
+            scope.launch { HeartRepository.upload(session, value.roundToInt()) }
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (Identity.get(this) == null || checkSelfPermission(Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            buildNotification(),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH else 0,
+        )
+        if (!measuring) {
+            HealthServices.getClient(this).measureClient.registerMeasureCallback(DataType.HEART_RATE_BPM, callback)
+            measuring = true
+        }
+        stopJob?.cancel()
+        stopJob = scope.launch {
+            delay(WINDOW_MS)
+            stopSelf()
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        if (measuring) {
+            HealthServices.getClient(this).measureClient.unregisterMeasureCallbackAsync(DataType.HEART_RATE_BPM, callback)
+        }
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    private fun buildNotification(): Notification {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL, "Live heartbeat", NotificationManager.IMPORTANCE_LOW),
+        )
+        return NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.drawable.ic_heart)
+            .setContentTitle("Sharing your heartbeat live")
+            .setOngoing(true)
+            .setLocalOnly(true)
+            .build()
+    }
+
+    companion object {
+        private const val TAG = "LiveHeartService"
+        private const val CHANNEL = "live"
+        private const val NOTIFICATION_ID = 10
+        private const val WINDOW_MS = 90_000L
+
+        fun request(ctx: Context) {
+            try {
+                ContextCompat.startForegroundService(ctx, Intent(ctx, LiveHeartService::class.java))
+            } catch (e: Exception) {
+                // Android may refuse to start a foreground service from the background; the
+                // passive listener keeps sending (less frequent) readings regardless.
+                Log.w(TAG, "Couldn't start live measuring", e)
+            }
+        }
+    }
+}

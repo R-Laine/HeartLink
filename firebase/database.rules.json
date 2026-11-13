@@ -1,0 +1,213 @@
+{
+  "rules": {
+    "couples": {
+      "$coupleId": {
+        ".read": "auth != null && data.child('devices').child(auth.uid).exists()",
+        "devices": {
+          "$uid": {
+            ".write": "auth != null && ((!data.exists() && $uid === auth.uid && newData.child('role').val() === 'a' && !newData.child('invite').exists() && !root.child('couples').child($coupleId).exists()) || (!data.exists() && $uid === auth.uid && newData.child('invite').isString() && root.child('invites').child(newData.child('invite').val()).child('couple').val() === $coupleId && root.child('invites').child(newData.child('invite').val()).child('role').val() === newData.child('role').val() && root.child('invites').child(newData.child('invite').val()).child('expires').val() > now && !newData.parent().parent().parent().parent().child('invites').child(newData.child('invite').val()).exists()) || (!data.exists() && !newData.child('invite').exists() && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === newData.child('role').val()) || ($uid === auth.uid && data.exists() && !newData.exists()))",
+            ".validate": "newData.hasChildren(['role']) && (newData.child('role').val() === 'a' || newData.child('role').val() === 'b')",
+            "role": {
+              ".validate": true
+            },
+            "invite": {
+              ".validate": "newData.isString()"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "members": {
+          "$role": {
+            ".write": "auth != null && !data.exists() && newData.parent().parent().child('devices').child(auth.uid).child('role').val() === $role",
+            ".validate": "newData.hasChildren(['name']) && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('name').val().length <= 30",
+            "name": {
+              ".validate": true
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "beats": {
+          "$role": {
+            ".write": "auth != null && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === $role",
+            ".validate": "newData.hasChildren(['bpm', 'ts']) && newData.child('bpm').isNumber() && newData.child('bpm').val() > 0 && newData.child('bpm').val() < 300 && newData.child('ts').isNumber() && newData.child('ts').val() <= now + 60000",
+            "bpm": {
+              ".validate": true
+            },
+            "ts": {
+              ".validate": true
+            },
+            "source": {
+              ".validate": "newData.val() === 'watch' || newData.val() === 'health' || newData.val() === 'test'"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "pendingInvite": {
+          ".write": "auth != null && newData.parent().child('devices').child(auth.uid).exists()",
+          ".validate": "newData.isString()"
+        },
+        "presence": {
+          "$role": {
+            ".write": "auth != null && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === $role",
+            "connected": {
+              ".validate": "newData.isBoolean()"
+            },
+            "lastSeen": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+            },
+            "lastActive": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+            },
+            "asleep": {
+              ".validate": "newData.isBoolean()"
+            },
+            "asleepAt": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+            },
+            "tz": {
+              ".validate": "newData.isString() && newData.val().length <= 64"
+            },
+            "battery": {
+              "$device": {
+                ".validate": "($device === 'phone' || $device === 'watch') && newData.hasChildren(['level', 'charging', 'ts'])",
+                "level": {
+                  ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100"
+                },
+                "charging": {
+                  ".validate": "newData.isBoolean()"
+                },
+                "ts": {
+                  ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+                },
+                "$other": {
+                  ".validate": false
+                }
+              }
+            },
+            "checkIn": {
+              ".validate": "newData.hasChildren(['text', 'ts'])",
+              "text": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 40"
+              },
+              "ts": {
+                ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+              },
+              "$other": {
+                ".validate": false
+              }
+            },
+            "quiet": {
+              ".validate": "newData.hasChildren(['enabled', 'start', 'end', 'allowWhenOnline'])",
+              "enabled": {
+                ".validate": "newData.isBoolean()"
+              },
+              "start": {
+                ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() < 1440"
+              },
+              "end": {
+                ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() < 1440"
+              },
+              "allowWhenOnline": {
+                ".validate": "newData.isBoolean()"
+              },
+              "$other": {
+                ".validate": false
+              }
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "messages": {
+          "$role": {
+            "$messageId": {
+              ".write": "auth != null && ((!data.exists() && newData.exists() && (root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'a' || root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'b') && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() !== $role) || (data.exists() && !newData.exists() && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === $role))",
+              ".validate": "newData.hasChildren(['text', 'ts'])",
+              "text": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200"
+              },
+              "ts": {
+                ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+              },
+              "from": {
+                ".validate": "newData.isString() && newData.val().length <= 30"
+              },
+              "$other": {
+                ".validate": false
+              }
+            }
+          }
+        },
+        "buzz": {
+          "$role": {
+            ".write": "auth != null && (root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'a' || root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'b') && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() !== $role",
+            ".validate": "newData.hasChildren(['bpm', 'ts'])",
+            "bpm": {
+              ".validate": "newData.isNumber() && newData.val() >= 20 && newData.val() <= 250"
+            },
+            "ts": {
+              ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+            },
+            "from": {
+              ".validate": "newData.isString() && newData.val().length <= 30"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "watching": {
+          "$role": {
+            ".write": "auth != null && (root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'a' || root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() === 'b') && root.child('couples').child($coupleId).child('devices').child(auth.uid).child('role').val() !== $role",
+            ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+          }
+        },
+        "countdown": {
+          ".write": "auth != null && root.child('couples').child($coupleId).child('devices').child(auth.uid).exists()",
+          ".validate": "newData.hasChildren(['date'])",
+          "date": {
+            ".validate": "newData.isString() && newData.val().matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "invites": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null && ((!data.exists() && newData.exists() && newData.parent().parent().child('couples').child(newData.child('couple').val()).child('devices').child(auth.uid).exists()) || (data.exists() && !newData.exists() && (data.child('expires').val() < now || newData.parent().parent().child('couples').child(data.child('couple').val()).child('devices').child(auth.uid).exists())))",
+        ".validate": "newData.hasChildren(['couple', 'role', 'expires']) && newData.child('couple').isString() && (newData.child('role').val() === 'a' || newData.child('role').val() === 'b') && newData.child('expires').isNumber() && newData.child('expires').val() <= now + 691200000",
+        "couple": {
+          ".validate": true
+        },
+        "role": {
+          ".validate": true
+        },
+        "expires": {
+          ".validate": true
+        },
+        "from": {
+          ".validate": "newData.isString() && newData.val().length <= 30"
+        },
+        "name": {
+          ".validate": "newData.isString() && newData.val().length <= 30"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}

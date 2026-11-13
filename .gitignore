@@ -1,0 +1,31 @@
+# Gradle / build
+.gradle/
+build/
+.kotlin/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing
+*.jks
+*.keystore
+
+# Firebase client config (download from the Firebase console into phone/ and watch/)
+google-services.json
+
+# Original extracted APK contents, kept locally for reference only
+archive/
+
+.DS_Store
+
+# Built APKs from build-apks.bat
+dist/
+
+# Rules test dependencies
+firebase/rules-test/node_modules/
+firebase/rules-test/package-lock.json
