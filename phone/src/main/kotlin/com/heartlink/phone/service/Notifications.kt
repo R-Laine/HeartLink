@@ -86,6 +86,25 @@ object Notifications {
         notify(ctx, ID_HEARTBEAT, notification)
     }
 
+    /** Quiet hours are over: the heartbeats that arrived silently are played now. */
+    fun showReplay(ctx: Context, fromName: String?, count: Int, bpm: Int, localOnly: Boolean) {
+        val who = fromName ?: "Your partner"
+        val title = if (count == 1) {
+            "$who sent you their heartbeat during quiet hours"
+        } else {
+            "$who sent you $count heartbeats during quiet hours"
+        }
+        val notification = NotificationCompat.Builder(ctx, CHANNEL_HEARTBEATS)
+            .setSmallIcon(R.drawable.ic_heart)
+            .setContentTitle(title)
+            .setContentText("Playing the latest: $bpm bpm 💓")
+            .setContentIntent(openAppIntent(ctx))
+            .setAutoCancel(true)
+            .setLocalOnly(localOnly)
+            .build()
+        notify(ctx, ID_HEARTBEAT, notification)
+    }
+
     fun showMoment(ctx: Context, text: String, quiet: Boolean) {
         val notification = NotificationCompat.Builder(ctx, if (quiet) CHANNEL_QUIET else CHANNEL_MOMENTS)
             .setSmallIcon(R.drawable.ic_heart)

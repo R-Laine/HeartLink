@@ -40,6 +40,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 private const val PAIR_RETRY_MS = 5_000L
+private const val REFUSED_RETRY_MS = 15_000L
 
 /**
  * Watch setup. Normally automatic: the watch asks its phone (over the Wear OS Data Layer) and,
@@ -47,7 +48,7 @@ private const val PAIR_RETRY_MS = 5_000L
  * A one-time invite code is the fallback, e.g. if the phone app isn't installed.
  */
 @Composable
-fun WatchSetup(onDone: (Session) -> Unit) {
+fun WatchSetup(note: String? = null, onDone: (Session) -> Unit) {
     val context = LocalContext.current
     val latestOnDone by rememberUpdatedState(onDone)
     var status by remember { mutableStateOf("Looking for your phone…") }
@@ -80,6 +81,8 @@ fun WatchSetup(onDone: (Session) -> Unit) {
     LaunchedEffect(Unit) {
         val messages = Wearable.getMessageClient(context)
         val nodes = Wearable.getNodeClient(context)
+        // After a refused link, pause so the screen doesn't flicker between setup and home.
+        if (note != null) delay(REFUSED_RETRY_MS)
         while (!done) {
             try {
                 val uid = HeartRepository.ensureSignedIn()
@@ -134,6 +137,9 @@ fun WatchSetup(onDone: (Session) -> Unit) {
             item { Text("HeartLink", fontSize = 18.sp) }
             item { Text(status, color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center) }
             item { CircularProgressIndicator() }
+            note?.let { text ->
+                item { Text(text, color = HeartLinkColors.Pink, fontSize = 10.sp, textAlign = TextAlign.Center) }
+            }
             item {
                 Text(
                     "Open HeartLink on your phone to link this watch automatically",

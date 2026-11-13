@@ -25,7 +25,12 @@ data class Presence(
     /** Last automatic or manual check-in, e.g. arriving home. */
     val checkIn: CheckIn? = null,
     val quietHours: QuietHours? = null,
+    /** Whether their phone can reach their watch, as their phone last reported it. */
+    val watch: WatchLink? = null,
 )
+
+/** A phone's connection to its watch. [since] is when it last changed (server time). */
+data class WatchLink(val connected: Boolean, val since: Long?)
 
 enum class PartnerStatus(val label: String) {
     Online("online"),
@@ -140,22 +145,62 @@ object Vibration {
     private const val GAP_MS = 110L
     private const val DUB_MS = 50L
     const val DEFAULT_BEATS = 8
+    val BEAT_CHOICES = listOf(4, 8, 12, 16)
 
     /**
      * Waveform for [beats] "lub-dub" heartbeats at [bpm], for VibrationEffect.createWaveform.
-     * Timings alternate off/on, starting with "off".
+     * Timings alternate off/on, starting with "off". [strength] scales the amplitudes (0–1);
+     * devices without amplitude control ignore it.
      */
-    fun heartbeatWaveform(bpm: Int, beats: Int = DEFAULT_BEATS): Pair<LongArray, IntArray> {
+    fun heartbeatWaveform(bpm: Int, beats: Int = DEFAULT_BEATS, strength: Float = 1f): Pair<LongArray, IntArray> {
+        fun amp(full: Int) = (full * strength.coerceIn(0f, 1f)).toInt().coerceIn(1, 255)
         val period = beatPeriodMs(bpm).toLong()
         val rest = (period - LUB_MS - GAP_MS - DUB_MS).coerceAtLeast(60L)
         val timings = ArrayList<Long>()
         val amplitudes = ArrayList<Int>()
         repeat(beats) { i ->
             timings += if (i == 0) 0L else rest; amplitudes += 0
-            timings += LUB_MS; amplitudes += 255
+            timings += LUB_MS; amplitudes += amp(255)
             timings += GAP_MS; amplitudes += 0
-            timings += DUB_MS; amplitudes += 160
+            timings += DUB_MS; amplitudes += amp(160)
         }
         return timings.toLongArray() to amplitudes.toIntArray()
+    }
+}
+
+/** How strongly received heartbeats vibrate. Stored per device. */
+enum class HapticStrength(val label: String, val scale: Float) {
+    Gentle("Gentle", 0.4f),
+    Normal("Normal", 0.7f),
+    Strong("Strong", 1f),
+    ;
+
+    companion object {
+        val DEFAULT = Normal
+        fun fromName(name: String?): HapticStrength = entries.firstOrNull { it.name == name } ?: DEFAULT
+    }
+}
+
+/**
+ * How to play one received heartbeat. The phone sends this to its watch as the BUZZ payload,
+ * "bpm|beats|strength", so the phone's haptic settings apply to the watch too. A bare "bpm"
+ * (from older phones) plays with the defaults.
+ */
+data class BuzzPlayback(
+    val bpm: Int,
+    val beats: Int = Vibration.DEFAULT_BEATS,
+    val strength: HapticStrength = HapticStrength.DEFAULT,
+) {
+    fun encode(): String = "$bpm|$beats|${strength.name}"
+
+    fun waveform(): Pair<LongArray, IntArray> = Vibration.heartbeatWaveform(bpm, beats, strength.scale)
+
+    companion object {
+        fun decode(text: String): BuzzPlayback? {
+            val parts = text.split('|')
+            val bpm = parts.getOrNull(0)?.toIntOrNull() ?: return null
+            val beats = parts.getOrNull(1)?.toIntOrNull()?.coerceIn(1, 30) ?: Vibration.DEFAULT_BEATS
+            return BuzzPlayback(bpm, beats, HapticStrength.fromName(parts.getOrNull(2)))
+        }
     }
 }

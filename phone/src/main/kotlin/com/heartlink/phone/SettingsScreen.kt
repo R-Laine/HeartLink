@@ -25,6 +25,9 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.SelectableDates
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,9 +52,11 @@ import com.heartlink.phone.location.HomeArrival
 import com.heartlink.phone.service.HeartLinkService
 import com.heartlink.phone.service.Settings
 import com.heartlink.shared.HeartLinkColors
+import com.heartlink.shared.HapticStrength
 import com.heartlink.shared.HeartRepository
 import com.heartlink.shared.QuietHours
 import com.heartlink.shared.Session
+import com.heartlink.shared.Vibration
 import com.heartlink.shared.minuteOfDayText
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -76,6 +81,9 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
     var homeNote by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<String?>(null) } // "start", "end", "date"
     var explainBackground by remember { mutableStateOf(false) }
+    var strength by remember { mutableStateOf(Settings.hapticStrength(context)) }
+    var beats by remember { mutableStateOf(Settings.hapticBeats(context)) }
+    var replay by remember { mutableStateOf(Settings.replayAfterQuiet(context)) }
     val countdown by remember(session) { HeartRepository.observeCountdown(session.coupleId) }
         .collectAsStateWithLifecycle(initialValue = null)
 
@@ -142,6 +150,22 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
             }
         }
 
+        Section("Heartbeats you receive")
+        Label("Strength")
+        Choices(HapticStrength.entries, strength, { it.label }) {
+            strength = it
+            Settings.setHapticStrength(context, it)
+        }
+        Label("Length")
+        Choices(Vibration.BEAT_CHOICES, beats, { "$it beats" }) {
+            beats = it
+            Settings.setHapticBeats(context, it)
+        }
+        Detail("Applies to this phone and its watch. Some watches and phones can't vary their strength.")
+        TextButton(onClick = { HeartLinkService.start(context, HeartLinkService.ACTION_TRY_HAPTICS) }, enabled = background) {
+            Text("Try it")
+        }
+
         Section("Quiet hours")
         Toggle(
             title = "Quiet hours",
@@ -160,6 +184,16 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
             checked = quiet.allowWhenOnline,
             enabled = quiet.enabled,
         ) { saveQuiet(quiet.copy(allowWhenOnline = it)) }
+        Toggle(
+            title = "Play heartbeats when quiet hours end",
+            detail = "Heartbeats sent during quiet hours vibrate once quiet hours are over, or when you start using your phone.",
+            checked = replay,
+            enabled = quiet.enabled,
+        ) {
+            replay = it
+            Settings.setReplayAfterQuiet(context, it)
+            if (!it) Settings.clearPendingReplay(context)
+        }
 
         Section("Moments")
         Toggle(
@@ -298,6 +332,20 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
             },
             dismissButton = { TextButton(onClick = { explainBackground = false }) { Text("Not now") } },
         )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun <T> Choices(options: List<T>, selected: T, label: (T) -> String, onSelect: (T) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        options.forEachIndexed { index, option ->
+            SegmentedButton(
+                selected = option == selected,
+                onClick = { onSelect(option) },
+                shape = SegmentedButtonDefaults.itemShape(index, options.size),
+            ) { Text(label(option), maxLines = 1) }
+        }
     }
 }
 

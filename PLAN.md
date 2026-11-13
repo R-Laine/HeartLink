@@ -2,7 +2,7 @@
 
 Ideas for what to build next, grouped into phases. Effort is a rough guide: **S** is about an afternoon, **M** a day or two, **L** several days.
 
-Before starting any of this, finish the steps under **Release checklist** that apply to the build currently being tested.
+Before starting any of this, finish the device checks under **Release checklist**.
 
 ## Phase 1: Make the watch the main way to use HeartLink
 
@@ -17,9 +17,8 @@ Before starting any of this, finish the steps under **Release checklist** that a
 
 | # | Item | Effort | Notes |
 |---|------|--------|-------|
-| 5 | **Watch reports its own online status** | M | Today only the phone holds the live connection, so a dead phone shows the person as "no connection" even when their LTE or Wi-Fi watch still works. Add a short presence update from the watch (`presence/{role}/watchSeen`) during passive heart-rate updates, and treat a recent one as reachable in `partnerStatus`. |
-| 6 | **Morning replay for quiet hours** | S | Quiet hours are done (see **Done**). Still to do: heartbeats that arrive during quiet hours are only shown as a silent notification; optionally queue them and play the vibration when quiet hours end. |
-| 7 | **Haptic settings** | S | Vibration strength and number of beats, stored per device. `Vibration.heartbeatWaveform` already takes a beat count; add an amplitude scale. |
+| 5 | **Watch reports its own online status** | M | Today only the phone holds the live connection, so a dead phone shows the person as "no connection" even when their LTE or Wi-Fi watch still works. Add a short presence update from the watch (`presence/{role}/watchSeen`) during passive heart-rate updates, and treat a recent one as reachable in `partnerStatus` and `lastHeardFrom`. |
+| 6 | **Haptic settings on the watch** | S | Strength and length are set on the phone and sent to the watch with each heartbeat (see **Done**). Add the same choices to the watch app for people who mostly use the watch, and use them when the watch has no phone connection. |
 
 ## Phase 3: Being together across distance
 
@@ -28,8 +27,7 @@ Before starting any of this, finish the steps under **Release checklist** that a
 | 9 | **Manual check-ins** | S | Automatic "Home safe 🏠" on arriving home is done (see **Done**). Still to do: one-tap check-ins such as "Landed ✈️", "At work" or "Leaving now", from the app, the watch and the notification. The storage (`presence/{role}/checkIn`, `HeartRepository.checkIn`) and the display on the partner's card already exist, so this is a picker and buttons. |
 | 10 | **Heartbeat sync** | M | While both of you are looking at HeartLink, show the two hearts side by side and celebrate when the rates stay within about 3 bpm for 10 seconds. The `watching` flags already tell each side when the other is looking. |
 | 11 | **Countdown on widget and tile** | S | The countdown itself is done (see **Done**). Add it to the widget (3) and tile (1) when those are built. |
-| 12 | **Overlap finder** | M | Using both time zones (already stored) and recent sleep times, suggest a good time to call, for example "19:00–22:30 yours". Needs a few days of sleep history, so it depends on 13 or a small sleep log. |
-| 13 | **Shared daily moment** | S | At an agreed time each day, both watches vibrate a heartbeat together. Schedule with `AlarmManager` on each phone and relay to the watch as with buzzes. |
+| 12 | **Overlap finder** | M | Using both time zones (already stored) and recent sleep times, suggest a good time to call, for example "19:00–22:30 yours". Needs a few days of sleep history, so it depends on 14 or a small sleep log. |
 
 ## Phase 4: History and keepsakes (opt-in)
 
@@ -42,40 +40,55 @@ Before starting any of this, finish the steps under **Release checklist** that a
 
 | # | Item | Effort | Notes |
 |---|------|--------|-------|
-| 16 | **App icon, splash screen and theming** | S | Adaptive launcher icon, a monochrome themed icon for Android 13 and later, and a splash screen. Proper Material 3 colour and type for the phone app. |
-| 17 | **Release signing** | S | Create an upload key and configure `signingConfigs` for both apps with the same key, which the watch needs to link through the phone. Keep the keystore and passwords out of git. |
+| 16 | **App icon and splash screen** | S | Adaptive launcher icon, a monochrome themed icon for Android 13 and later, and a splash screen. The phone app's dark theme is done (see **Done**); the setup and settings screens could still use a design pass to match the home screen. |
+| 17 | **Release signing** | S | Release builds are currently signed with the debug key so they install over debug builds. Before publishing, create an upload key and configure `signingConfigs` for both apps with the same key, which the watch needs to link through the phone. Keep the keystore and passwords out of git. Installing builds signed with the new key means uninstalling the debug-signed ones first. |
 | 18 | **Google Play release** | M | Internal testing track first. Needs the Health Connect declaration form, a privacy policy URL, the data safety form, and a justification for the `connectedDevice` background service type. |
 
 ## Done
 
 | Item | What was built |
 |------|----------------|
-| **Morning and goodnight moments** | A notification when the partner wakes up or falls asleep ("Laine is awake ☀️"), from their watch's sleep detection. Settings → Moments turns it off. Silent during your quiet hours. |
-| **Arriving home** (automatic half of check-ins) | Settings → "Tell Laine when I get home": stand at home and tap Set. A geofence around home (150 m, location stays on the phone) posts "Home safe 🏠" on your card for 3 hours and messages your partner. At most once per 30 minutes. Needs "Allow all the time" location access. |
+| **Morning and goodnight moments** | A notification when the partner wakes up or falls asleep ("Evelyn is awake ☀️"), from their watch's sleep detection. Settings → Moments turns it off. Silent during your quiet hours. |
+| **Arriving home** (automatic half of check-ins) | Settings → "Tell your partner when I get home": stand at home and tap Set. A geofence around home (150 m, location stays on the phone) posts "Home safe 🏠" on your card for 3 hours and messages your partner. At most once per 30 minutes. Needs "Allow all the time" location access. |
 | **Countdown** | Settings → "Together again" sets the date (either person can change it). Shows "Together again in 23 days 💞" on both phones and watches. |
 | **Quiet hours** | On by default, 23:00–07:00, set in Settings. Heartbeats, messages and moments arrive silently (no vibration or sound) during quiet hours or while your watch says you're asleep. "Not while I'm using my phone" (on by default) lets things through when you're online. Your partner sees "🌙 Quiet hours" on your card. |
+| **Replay after quiet hours** | Settings → Quiet hours → "Play heartbeats when quiet hours end" (on by default). Heartbeats that arrived silently are remembered, and the latest one plays once it's no longer quiet (or when you start using your phone), with a notification such as "Evelyn sent you 3 heartbeats during quiet hours". Dropped after 18 hours. |
+| **Haptic settings** | Settings → "Heartbeats you receive": strength (Gentle, Normal, Strong) and length (4, 8, 12 or 16 beats), with a Try it button. Stored on the phone and sent to the watch with each heartbeat (`BuzzPlayback`), so both vibrate the same way. Older phones' plain-bpm messages still play with the defaults. |
+| **Away and "no connection" statuses** | Inactive after 10 minutes without phone use, away after an hour. "Offline" is now "no connection" and shows how long, for example "no connection · 2h 14m", on the phone, the watch and the notification. The partner's card keeps their last known heartbeat (dimmed, labelled "Last known"), local time and battery. |
+| **Home screen redesign** | Dark Material 3 theme. The partner's card fills the screen, with a status chip, local time and per-device battery chips (charging bolt, pink when low), and a heart that scales to the space. Your own stats are replaced by a sharing indicator that says whether your heartbeat is reaching your partner and how to fix it if not. Settings, Add device and Unlink moved to the top bar. |
+| **Partner's watch connection** | Each phone checks every minute whether it can reach its watch and reports changes to `presence/{role}/watch`. The partner's card shows the watch battery while connected, or "not connected · 2h" when not. Also shown on the watch. |
+| **Watch app redesign** | Time at the top, the partner's name and status, their heart and bpm (dimmed and "Last known" with no connection), a Send heartbeat chip, a details panel (their local time, phone and watch battery or connection, check-in, quiet hours), the countdown, and a small "You · 72 bpm" line showing your own watch is measuring. |
+| **Always-on notification can't be swiped away for good** | Android 14 and later let people dismiss even foreground-service notifications; HeartLink posts it straight back. |
+| **Smaller APKs** | `build-apks.bat` builds release versions shrunk with R8, with English-only resources: about 2.3 MB for the phone and 3.9 MB for the watch, down from 14 MB and 31 MB. |
+| **Firebase project** | Project `heartlink-3b45b`, Realtime Database in the US region, rules published, anonymous sign-in enabled. |
 
 ## Release checklist (for the current build)
 
-- [ ] Publish `firebase/database.rules.json` in the Firebase console.
+- [ ] Publish `firebase/database.rules.json` in the Firebase console again (it now allows `presence/{role}/watch`).
 - [ ] Run the rules tests: `firebase emulators:start --only database`, then `npm install && npm test` in `firebase/rules-test/`.
-- [ ] Check that Anonymous sign-in is enabled in Firebase Authentication.
-- [ ] Re-pair both people after installing (the data layout changed).
+- [x] Check that Anonymous sign-in is enabled in Firebase Authentication.
+- [x] Re-pair both people after installing (new Firebase project).
 - [ ] On real devices, check:
+  - [ ] the release builds work as well as the debug builds did (R8 can remove code that libraries look up at runtime; look for crashes on linking, heartbeats, messages and the watch)
   - [ ] the watch links itself through the phone
   - [ ] live readings start on the watch while the partner is looking (Android may block this from the background)
-  - [ ] status changes to "no connection" within a minute or two of switching a phone off
+  - [ ] status changes to "no connection" within a minute or two of switching a phone off, and the timer counts up
   - [ ] status changes to away after an hour without using the phone
   - [ ] asleep shows after the watch detects sleep
   - [ ] messages and heartbeats arrive with HeartLink closed
   - [ ] battery levels update on both cards
+  - [ ] the sharing indicator turns amber with a fix when the watch is disconnected
+  - [ ] turning off Bluetooth on one phone shows "watch not connected" on the partner's card within a minute or two
+  - [ ] swiping away the always-on notification brings it straight back
   - [ ] quiet hours: a heartbeat sent at night arrives silently; it vibrates normally while you're using your phone
+  - [ ] replay: a heartbeat sent during quiet hours plays when they end, with the "during quiet hours" notification
+  - [ ] haptic settings: Try it, and a received heartbeat on the watch, follow the chosen strength and length
   - [ ] arriving home posts "Home safe 🏠" (needs "Allow all the time" location)
   - [ ] wake/sleep notifications appear after the watch detects a change
 
 ## Suggested order
 
-1. Release checklist
+1. The device checks in the release checklist
 2. Phase 1, items 1 and 2 (complication, tile, "thinking of you" tap)
 3. Phase 2, item 5 (watch online status), then 9 (manual check-ins)
 4. Whatever feels most worth having from Phases 3 to 5

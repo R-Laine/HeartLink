@@ -31,7 +31,7 @@ import com.heartlink.shared.LIVE_THRESHOLD_MS
 import com.heartlink.shared.Presence
 import com.heartlink.shared.Reading
 import com.heartlink.shared.Session
-import com.heartlink.shared.Vibration
+import com.heartlink.shared.BuzzPlayback
 import com.heartlink.shared.WearPaths
 import com.heartlink.shared.localTimeText
 import com.heartlink.shared.PartnerStatus
@@ -73,7 +73,11 @@ class HeartLinkService : Service() {
     private var lastInteraction = 0L
 
     private val activityReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = markActive()
+        override fun onReceive(context: Context, intent: Intent) {
+            markActive()
+            // Picking up the phone can end quiet hours early ("not while I'm using my phone").
+            scope.launch { replayIfDue() }
+        }
     }
 
     // Battery changes arrive often (voltage, temperature); Battery.reportIfChanged filters them.
@@ -117,7 +121,11 @@ class HeartLinkService : Service() {
         when (intent?.action) {
             ACTION_SEND_HEARTBEAT -> sendMyHeartbeat(current)
             ACTION_REFRESH -> refreshNotificationNow()
-            ACTION_QUIET_CHANGED -> reportQuietHours(current)
+            ACTION_QUIET_CHANGED -> {
+                reportQuietHours(current)
+                scope.launch { replayIfDue() }
+            }
+            ACTION_TRY_HAPTICS -> scope.launch { playHeartbeat(myLastBpm ?: DEFAULT_BPM) }
         }
         if (current != session) {
             session = current
@@ -176,6 +184,36 @@ class HeartLinkService : Service() {
         // Partner's heartbeat → vibration.
         launch {
             HeartRepository.observeBuzz(session).safe().collect { buzz -> if (buzz != null) playBuzz(buzz) }
+        }
+
+        // Whether this phone can reach its watch → shown on the partner's card. Written only when
+        // it changes, plus a refresh every so often so the partner can trust it's current.
+        launch {
+            var reported: Boolean? = null
+            var reportedAt = 0L
+            while (true) {
+                val connected = runCatching {
+                    Wearable.getNodeClient(this@HeartLinkService).connectedNodes.await().isNotEmpty()
+                }.getOrNull()
+                val now = System.currentTimeMillis()
+                if (connected != null && (connected != reported || now - reportedAt > WATCH_LINK_REFRESH_MS)) {
+                    runCatching { HeartRepository.reportWatchLink(session, connected) }
+                        .onSuccess {
+                            reported = connected
+                            reportedAt = now
+                        }
+                        .onFailure { Log.w(TAG, "Couldn't report watch connection", it) }
+                }
+                delay(WATCH_LINK_CHECK_MS)
+            }
+        }
+
+        // Heartbeats held back during quiet hours → play them once quiet hours end.
+        launch {
+            while (true) {
+                replayIfDue()
+                delay(REPLAY_CHECK_MS)
+            }
         }
 
         // Partner wakes up / falls asleep → gentle notification.
@@ -288,17 +326,47 @@ class HeartLinkService : Service() {
         if (System.currentTimeMillis() - buzz.timestamp > BUZZ_MAX_AGE_MS) return
 
         if (quietNow()) {
-            // Quiet hours: no vibration anywhere, just a silent notification to find later.
+            // Quiet hours: no vibration anywhere, just a silent notification to find later,
+            // and (if enabled) a replay once quiet hours end.
             Notifications.showHeartbeat(this, buzz.fromName, buzz.bpm, localOnly = true, quiet = true)
+            if (Settings.replayAfterQuiet(this)) Settings.addPendingReplay(this, buzz.bpm, buzz.fromName, buzz.timestamp)
             return
         }
-        val sentToWatch = sendToWatch(WearPaths.BUZZ, buzz.bpm.toString().toByteArray())
-        if (!sentToWatch) vibrate(buzz.bpm)
+        val sentToWatch = playHeartbeat(buzz.bpm)
         Notifications.showHeartbeat(this, buzz.fromName, buzz.bpm, localOnly = sentToWatch)
     }
 
-    private fun vibrate(bpm: Int) {
-        val (timings, amplitudes) = Vibration.heartbeatWaveform(bpm)
+    /** Plays a heartbeat on the watch if one is connected, otherwise on this phone. */
+    private suspend fun playHeartbeat(bpm: Int): Boolean {
+        val playback = BuzzPlayback(bpm, Settings.hapticBeats(this), Settings.hapticStrength(this))
+        val sentToWatch = sendToWatch(WearPaths.BUZZ, playback.encode().toByteArray())
+        if (!sentToWatch) vibrate(playback)
+        return sentToWatch
+    }
+
+    private var replaying = false
+
+    /** If heartbeats were held back during quiet hours and it's no longer quiet, play them now. */
+    private suspend fun replayIfDue() {
+        if (replaying) return
+        val pending = Settings.pendingReplay(this) ?: return
+        if (System.currentTimeMillis() - pending.firstAt > REPLAY_MAX_AGE_MS) {
+            Settings.clearPendingReplay(this)
+            return
+        }
+        if (quietNow()) return
+        replaying = true
+        try {
+            Settings.clearPendingReplay(this)
+            val sentToWatch = playHeartbeat(pending.bpm)
+            Notifications.showReplay(this, pending.fromName, pending.count, pending.bpm, localOnly = sentToWatch)
+        } finally {
+            replaying = false
+        }
+    }
+
+    private fun vibrate(playback: BuzzPlayback) {
+        val (timings, amplitudes) = playback.waveform()
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             getSystemService(VibratorManager::class.java).defaultVibrator
         } else {
@@ -372,10 +440,12 @@ class HeartLinkService : Service() {
             val time = localTimeText(state.presence?.timeZone, state.now)
             val battery = state.presence?.phoneBattery?.let { Battery.label(it, "📱", state.now) }
             if (current == PartnerStatus.NoConnection) {
-                // The timer is the news; the old reading is just context.
+                // The timer is the news; the old reading is just context. No battery age here,
+                // because the title's timer already says how old everything is.
+                val lastBattery = state.presence?.phoneBattery?.let { Battery.label(it, "📱", it.updatedAt ?: state.now) }
                 builder.setContentTitle("$name · $status")
                     .setContentText(
-                        listOfNotNull(beat?.let { "Last known ${it.bpm} bpm" }, time?.let { "$it there" }, battery)
+                        listOfNotNull(beat?.let { "Last known ${it.bpm} bpm" }, time?.let { "$it there" }, lastBattery)
                             .joinToString(" · "),
                     )
             } else {
@@ -404,10 +474,17 @@ class HeartLinkService : Service() {
         const val ACTION_SEND_HEARTBEAT = "com.heartlink.phone.SEND_HEARTBEAT"
         const val ACTION_REFRESH = "com.heartlink.phone.REFRESH"
         const val ACTION_QUIET_CHANGED = "com.heartlink.phone.QUIET_CHANGED"
+        const val ACTION_TRY_HAPTICS = "com.heartlink.phone.TRY_HAPTICS"
 
         private val ACTIVE_WRITE_INTERVAL_MS = TimeUnit.MINUTES.toMillis(1)
         private val WATCHING_FRESH_MS = TimeUnit.SECONDS.toMillis(60)
         private val BUZZ_MAX_AGE_MS = TimeUnit.MINUTES.toMillis(2)
+        private val REPLAY_CHECK_MS = TimeUnit.MINUTES.toMillis(1)
+        private val WATCH_LINK_CHECK_MS = TimeUnit.MINUTES.toMillis(1)
+        private val WATCH_LINK_REFRESH_MS = TimeUnit.MINUTES.toMillis(30)
+
+        /** A replay older than this (a quiet period that never ended, for example) is dropped. */
+        private val REPLAY_MAX_AGE_MS = TimeUnit.HOURS.toMillis(18)
         private val NOTIFICATION_TICK_MS = TimeUnit.SECONDS.toMillis(30)
         private const val DEFAULT_BPM = 70
 

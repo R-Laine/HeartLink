@@ -22,7 +22,11 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the debug key so release builds install over debug ones, and the phone
+            // and watch share a signature (needed for linking through the Data Layer). Use a real
+            // keystore before publishing to the Play Store.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -31,6 +35,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        // Libraries ship translations for ~80 languages; the app's own text is English only.
+        localeFilters += "en"
+    }
     buildFeatures {
         compose = true
     }

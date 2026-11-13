@@ -7,6 +7,15 @@ object HeartLinkColors {
     val Blue = Color(0xFF5BCEFA)
 
     fun forPerson(id: String): Color = if (id == "a") Pink else Blue
+
+    /** Dot and text colour for a partner status, the same on phone and watch. */
+    fun forStatus(status: PartnerStatus): Color = when (status) {
+        PartnerStatus.Online -> Color(0xFF4CD964)
+        PartnerStatus.Inactive -> Color(0xFFFFCC00)
+        PartnerStatus.Away -> Color(0xFFFF9F43)
+        PartnerStatus.Asleep -> Color(0xFF8E8EF0)
+        PartnerStatus.NoConnection, PartnerStatus.Unknown -> Color(0xFF9A9AA6)
+    }
 }
 
 /** A reading younger than this is shown as "live". */

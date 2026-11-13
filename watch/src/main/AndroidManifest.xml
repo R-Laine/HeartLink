@@ -21,6 +21,7 @@
     </queries>
 
     <application
+        android:name=".HeartLinkApplication"
         android:icon="@drawable/ic_heart"
         android:label="HeartLink"
         android:theme="@android:style/Theme.DeviceDefault">

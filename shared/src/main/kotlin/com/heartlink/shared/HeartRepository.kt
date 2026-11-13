@@ -5,13 +5,18 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.DatabaseException
 import com.google.firebase.database.DatabaseReference
 import com.google.firebase.database.MutableData
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.Transaction
 import com.google.firebase.database.ValueEventListener
 import com.google.firebase.database.database
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -20,6 +25,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
@@ -53,7 +60,49 @@ object HeartRepository {
     private const val CODE_ATTEMPTS = 5
     private val PARTNER_INVITE_TTL_MS = TimeUnit.DAYS.toMillis(7)
     val DEVICE_INVITE_TTL_MS = TimeUnit.MINUTES.toMillis(15)
+    private val SIGN_IN_RETRY_MS = TimeUnit.SECONDS.toMillis(5)
+
     private val lastWrite = AtomicLong(0L)
+
+    private val _accessDenied = MutableStateFlow(false)
+
+    /**
+     * True once the database has refused this device: it's no longer part of the couple it
+     * thinks it's linked to (unlinked elsewhere, or a link from an older Firebase project).
+     */
+    val accessDenied: StateFlow<Boolean> = _accessDenied
+
+    /**
+     * Checks this device is still allowed into its couple. True if it is, false if the database
+     * says it isn't, null if that couldn't be checked (offline, for example).
+     */
+    suspend fun isStillLinked(session: Session): Boolean? = try {
+        val uid = ensureSignedIn()
+        val exists = couple(session.coupleId).child("devices").child(uid).get().await().exists()
+        if (!exists) {
+            lastDenied = "not listed in couples/${session.coupleId}/devices"
+            _accessDenied.value = true
+        }
+        exists
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        val denied = (e as? DatabaseException)?.message?.contains("permission", ignoreCase = true) == true ||
+            e.message?.contains("permission", ignoreCase = true) == true
+        Log.w(TAG, "Couldn't check link (denied=$denied)", e)
+        if (denied) {
+            lastDenied = "couples/${session.coupleId}/devices"
+            _accessDenied.value = true
+            false
+        } else {
+            null
+        }
+    }
+
+    /** Call after unlinking or linking again, so [accessDenied] starts fresh. */
+    fun resetAccessDenied() {
+        _accessDenied.value = false
+    }
 
     private val database get() = Firebase.database
     private val root get() = database.reference
@@ -63,9 +112,25 @@ object HeartRepository {
     /** Signs in anonymously if needed and returns this device's user ID. */
     suspend fun ensureSignedIn(): String {
         val auth = Firebase.auth
-        val user = auth.currentUser ?: auth.signInAnonymously().await().user
-        return checkNotNull(user) { "Anonymous sign-in returned no user" }.uid
+        auth.currentUser?.let { return it.uid }
+        // Several parts of the app ask at once on first launch. Without the lock each would
+        // create its own anonymous user, and the watch could hand its phone one ID while
+        // reading with another, which the database refuses.
+        return signInLock.withLock {
+            val user = auth.currentUser ?: auth.signInAnonymously().await().user
+            checkNotNull(user) { "Anonymous sign-in returned no user" }.uid
+        }
     }
+
+    private val signInLock = Mutex()
+
+    /** This device's user ID, if signed in. Shown when troubleshooting a refused link. */
+    val currentUid: String? get() = Firebase.auth.currentUser?.uid
+
+    /** The last database path that refused this device, for troubleshooting. */
+    @Volatile
+    var lastDenied: String? = null
+        private set
 
     // ---- Linking -------------------------------------------------------------------------
 
@@ -312,6 +377,12 @@ object HeartRepository {
                     watchBattery = parseBattery(snap.child("battery").child(Devices.WATCH)),
                     checkIn = parseCheckIn(snap.child("checkIn")),
                     quietHours = parseQuietHours(snap.child("quiet")),
+                    watch = snap.child("watch").takeIf { it.exists() }?.let { w ->
+                        WatchLink(
+                            connected = w.child("connected").getValue(Boolean::class.java) == true,
+                            since = w.child("ts").getValue(Long::class.java),
+                        )
+                    },
                 )
             }
         }
@@ -321,6 +392,14 @@ object HeartRepository {
         ensureSignedIn()
         presence(session.coupleId, session.role).child("battery").child(device)
             .setValue(mapOf("level" to state.level, "charging" to state.charging, "ts" to ServerValue.TIMESTAMP))
+            .await()
+    }
+
+    /** Tells the partner whether this phone can currently reach its watch. */
+    suspend fun reportWatchLink(session: Session, connected: Boolean) {
+        ensureSignedIn()
+        presence(session.coupleId, session.role).child("watch")
+            .setValue(mapOf("connected" to connected, "ts" to ServerValue.TIMESTAMP))
             .await()
     }
 
@@ -468,16 +547,37 @@ object HeartRepository {
         throw lastError ?: IllegalStateException("Couldn't create an invite code")
     }
 
+    /**
+     * Never throws to collectors: screens collect these directly, and an exception there closes
+     * the app. Sign-in is retried until it works (e.g. a watch with no connection yet), and a
+     * refused listener just stops, flagging [accessDenied] if this device isn't in the couple.
+     */
     private fun <T> valueFlow(ref: DatabaseReference, map: (DataSnapshot) -> T): Flow<T> = callbackFlow {
-        ensureSignedIn()
+        while (true) {
+            try {
+                ensureSignedIn()
+                break
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Sign-in failed; retrying", e)
+                delay(SIGN_IN_RETRY_MS)
+            }
+        }
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                trySend(map(snapshot))
+                runCatching { map(snapshot) }
+                    .onSuccess { trySend(it) }
+                    .onFailure { Log.w(TAG, "Couldn't read ${ref.path}", it) }
             }
 
             override fun onCancelled(error: DatabaseError) {
                 Log.w(TAG, "Listener on ${ref.path} cancelled: ${error.message}")
-                close(error.toException())
+                if (error.code == DatabaseError.PERMISSION_DENIED) {
+                    lastDenied = ref.path.toString()
+                    _accessDenied.value = true
+                }
+                close()
             }
         }
         ref.addValueEventListener(listener)

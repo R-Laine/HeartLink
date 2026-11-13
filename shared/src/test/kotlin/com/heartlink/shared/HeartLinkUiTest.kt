@@ -223,4 +223,22 @@ class HeartLinkUiTest {
         assertEquals("no connection · 2h 14m", statusLabel(PartnerStatus.NoConnection, presence, beat, now))
         assertEquals("away", statusLabel(PartnerStatus.Away, presence, beat, now))
     }
+
+    @Test
+    fun buzzPlaybackRoundTrips() {
+        val playback = BuzzPlayback(72, 12, HapticStrength.Gentle)
+        assertEquals(playback, BuzzPlayback.decode(playback.encode()))
+        // Older phones send just the bpm.
+        assertEquals(BuzzPlayback(65), BuzzPlayback.decode("65"))
+        assertEquals(null, BuzzPlayback.decode("nonsense"))
+    }
+
+    @Test
+    fun strengthScalesAmplitudes() {
+        val (_, full) = Vibration.heartbeatWaveform(60, beats = 1, strength = 1f)
+        val (_, gentle) = Vibration.heartbeatWaveform(60, beats = 1, strength = 0.4f)
+        assertEquals(255, full.max())
+        assertEquals(102, gentle.max())
+        assertEquals(0, gentle.min())
+    }
 }

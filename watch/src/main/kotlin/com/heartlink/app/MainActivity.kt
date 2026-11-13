@@ -27,6 +27,8 @@ import kotlin.math.roundToInt
 class MainActivity : ComponentActivity() {
     private val session = mutableStateOf<Session?>(null)
     private val myBpm = mutableStateOf<Int?>(null)
+    private val crash = mutableStateOf<String?>(null)
+    private val setupNote = mutableStateOf<String?>(null)
     private var measuring = false
 
     private val measureCallback = object : MeasureCallback {
@@ -44,26 +46,63 @@ class MainActivity : ComponentActivity() {
 
     private val sensorPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) afterSensorPermission()
+            if (granted) afterSensorPermission() else requestActivityRecognition()
         }
 
     private val backgroundPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { requestActivityRecognition() }
 
     private val activityPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> if (granted) setupBackground() }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) setupBackground()
+            requestNotifications()
+        }
+
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         session.value = Identity.get(this)
         lifecycleScope.launch { runCatching { HeartRepository.ensureSignedIn() } }
+        // A link the database no longer accepts (unlinked from the phone, or made in an older
+        // Firebase project) would otherwise leave the watch stuck: forget it and pair again.
+        session.value?.let { current ->
+            lifecycleScope.launch { HeartRepository.isStillLinked(current) }
+        }
+        lifecycleScope.launch {
+            HeartRepository.accessDenied.collect { denied ->
+                val current = session.value
+                if (!denied || current == null) return@collect
+                // One refused read isn't proof the link is gone: only forget it if the database
+                // confirms this watch isn't in the couple.
+                when (HeartRepository.isStillLinked(current)) {
+                    false -> forgetLink(refused = true)
+                    true -> {
+                        android.util.Log.w("MainActivity", "Read refused but still linked: ${HeartRepository.lastDenied}")
+                        HeartRepository.resetAccessDenied()
+                    }
+                    null -> Unit
+                }
+            }
+        }
+        crash.value = CrashLog.read(this)
         setContent {
-            HeartLinkApp(
-                session = session.value,
-                myBpm = myBpm.value,
-                onLinked = ::link,
-                onUnlink = ::unlink,
-            )
+            val report = crash.value
+            if (report != null) {
+                CrashReport(report, onDismiss = {
+                    CrashLog.clear(this)
+                    crash.value = null
+                })
+            } else {
+                HeartLinkApp(
+                    session = session.value,
+                    myBpm = myBpm.value,
+                    setupNote = setupNote.value,
+                    onLinked = ::link,
+                    onUnlink = ::unlink,
+                )
+            }
         }
         if (session.value != null) requestSensors()
     }
@@ -84,6 +123,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun link(newSession: Session) {
+        HeartRepository.resetAccessDenied()
+        setupNote.value = null
         Identity.set(this, newSession)
         session.value = newSession
         requestSensors()
@@ -97,10 +138,30 @@ class MainActivity : ComponentActivity() {
                     .onFailure { android.util.Log.w("MainActivity", "Couldn't remove device", it) }
             }
         }
+        forgetLink()
+    }
+
+    /**
+     * Clears the link on this watch only; setup then pairs it again through the phone. When the
+     * database [refused] the link, setup explains why and waits before asking the phone again,
+     * so a link that keeps failing can't flicker between screens.
+     */
+    private fun forgetLink(refused: Boolean = false) {
+        android.util.Log.w("MainActivity", "Link no longer valid; pairing again")
+        setupNote.value = if (refused) {
+            listOfNotNull(
+                "The database refused this watch's link. Trying again shortly.",
+                HeartRepository.currentUid?.let { "Watch ID ${it.take(8)}" },
+                HeartRepository.lastDenied,
+            ).joinToString("\n")
+        } else {
+            null
+        }
         stopLive()
-        HealthServices.getClient(this).passiveMonitoringClient.clearPassiveListenerServiceAsync()
+        runCatching { HealthServices.getClient(this).passiveMonitoringClient.clearPassiveListenerServiceAsync() }
         Battery.reset(this)
         Identity.clear(this)
+        HeartRepository.resetAccessDenied()
         session.value = null
         myBpm.value = null
     }
@@ -108,18 +169,27 @@ class MainActivity : ComponentActivity() {
     private fun has(permission: String) =
         checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
+    /** Wear OS 6 (Android 16) replaces BODY_SENSORS with a Health Connect heart-rate permission. */
+    private val heartRatePermission =
+        if (Build.VERSION.SDK_INT >= 36) "android.permission.health.READ_HEART_RATE" else Manifest.permission.BODY_SENSORS
+
+    private fun hasHeartRate() = has(heartRatePermission) || has(Manifest.permission.BODY_SENSORS)
+
     private fun requestSensors() {
-        if (has(Manifest.permission.BODY_SENSORS)) afterSensorPermission()
-        else sensorPermission.launch(Manifest.permission.BODY_SENSORS)
+        if (hasHeartRate()) afterSensorPermission()
+        else sensorPermission.launch(heartRatePermission)
     }
 
     private fun afterSensorPermission() {
         startLive()
         setupBackground()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            !has(Manifest.permission.BODY_SENSORS_BACKGROUND)
-        ) {
-            backgroundPermission.launch(Manifest.permission.BODY_SENSORS_BACKGROUND)
+        val backgroundSensors = if (Build.VERSION.SDK_INT >= 36) {
+            "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+        } else {
+            Manifest.permission.BODY_SENSORS_BACKGROUND
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !has(backgroundSensors)) {
+            backgroundPermission.launch(backgroundSensors)
         } else {
             requestActivityRecognition()
         }
@@ -129,20 +199,33 @@ class MainActivity : ComponentActivity() {
     private fun requestActivityRecognition() {
         if (!has(Manifest.permission.ACTIVITY_RECOGNITION)) {
             activityPermission.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+        } else {
+            requestNotifications()
+        }
+    }
+
+    /** For the notification shown while measuring live, and heartbeats that arrive silently. */
+    private fun requestNotifications() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !has(Manifest.permission.POST_NOTIFICATIONS)) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
     private fun startLive() {
-        if (measuring || session.value == null || !has(Manifest.permission.BODY_SENSORS)) return
-        HealthServices.getClient(this).measureClient
-            .registerMeasureCallback(DataType.HEART_RATE_BPM, measureCallback)
-        measuring = true
+        if (measuring || session.value == null || !hasHeartRate()) return
+        runCatching {
+            HealthServices.getClient(this).measureClient
+                .registerMeasureCallback(DataType.HEART_RATE_BPM, measureCallback)
+            measuring = true
+        }.onFailure { android.util.Log.w("MainActivity", "Couldn't start live heart rate", it) }
     }
 
     private fun stopLive() {
         if (!measuring) return
-        HealthServices.getClient(this).measureClient
-            .unregisterMeasureCallbackAsync(DataType.HEART_RATE_BPM, measureCallback)
+        runCatching {
+            HealthServices.getClient(this).measureClient
+                .unregisterMeasureCallbackAsync(DataType.HEART_RATE_BPM, measureCallback)
+        }
         measuring = false
     }
 
@@ -151,7 +234,9 @@ class MainActivity : ComponentActivity() {
             .setDataTypes(setOf(DataType.HEART_RATE_BPM))
             .setShouldUserActivityInfoBeRequested(has(Manifest.permission.ACTIVITY_RECOGNITION))
             .build()
-        HealthServices.getClient(this).passiveMonitoringClient
-            .setPassiveListenerServiceAsync(PassiveHeartService::class.java, config)
+        runCatching {
+            HealthServices.getClient(this).passiveMonitoringClient
+                .setPassiveListenerServiceAsync(PassiveHeartService::class.java, config)
+        }.onFailure { android.util.Log.w("MainActivity", "Couldn't start background heart rate", it) }
     }
 }

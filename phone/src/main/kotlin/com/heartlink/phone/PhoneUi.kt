@@ -84,8 +84,9 @@ import com.heartlink.shared.Session
 import com.heartlink.shared.Sources
 import com.heartlink.shared.StatusRules
 import com.heartlink.shared.ageText
-import com.heartlink.shared.anyBatteryLow
-import com.heartlink.shared.batteryLine
+import com.heartlink.shared.BatteryState
+import com.heartlink.shared.Presence
+import com.heartlink.shared.durationText
 import com.heartlink.shared.beatPeriodMs
 import com.heartlink.shared.countdownText
 import com.heartlink.shared.heartbeatScale
@@ -127,8 +128,27 @@ private val HeartLinkDark = darkColorScheme(
 fun PhoneApp(initialSession: Session?, onSessionChange: (Session?) -> Unit) {
     var session by remember { mutableStateOf(initialSession) }
     fun update(new: Session?) {
+        HeartRepository.resetAccessDenied()
         session = new
         onSessionChange(new)
+    }
+
+    // If the database no longer accepts this phone's link (unlinked from another device, or a
+    // link from an older Firebase project), go back to setup rather than showing nothing.
+    val denied by HeartRepository.accessDenied.collectAsStateWithLifecycle()
+    LaunchedEffect(session) {
+        val current = session ?: return@LaunchedEffect
+        HeartRepository.isStillLinked(current)
+    }
+    LaunchedEffect(denied) {
+        val current = session
+        if (!denied || current == null) return@LaunchedEffect
+        // One refused read isn't proof: only unlink if the database confirms this phone is gone.
+        when (HeartRepository.isStillLinked(current)) {
+            false -> update(null)
+            true -> HeartRepository.resetAccessDenied()
+            null -> Unit
+        }
     }
 
     MaterialTheme(colorScheme = HeartLinkDark) {
@@ -278,11 +298,7 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
                     now = now,
                     status = partnerStatusNow,
                     statusText = statusLabel(partnerStatusNow, partnerPresence, theirs, now),
-                    localTime = localTimeText(partnerPresence?.timeZone, now)?.let { time ->
-                        listOfNotNull(time, timeDifferenceText(partnerPresence?.timeZone, now)).joinToString(" · ")
-                    },
-                    battery = batteryLine(partnerPresence, now),
-                    batteryLow = anyBatteryLow(partnerPresence),
+                    presence = partnerPresence,
                     notes = listOfNotNull(
                         partnerPresence?.checkIn?.takeIf { it.isVisible(now) }
                             ?.let { "${it.text} · ${ageText(now - it.timestamp)}" },
@@ -566,9 +582,7 @@ private fun PartnerCard(
     now: Long,
     status: PartnerStatus,
     statusText: String,
-    localTime: String?,
-    battery: String?,
-    batteryLow: Boolean,
+    presence: Presence?,
     notes: List<String>,
     modifier: Modifier = Modifier,
 ) {
@@ -585,28 +599,36 @@ private fun PartnerCard(
             modifier = Modifier.fillMaxSize().padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    name,
-                    color = Color.White,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (status != PartnerStatus.Unknown) StatusLabel(status, statusText)
-            }
-            if (localTime != null || battery != null) {
-                Spacer(Modifier.height(10.dp))
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    localTime?.let { Pill("🕐 $it") }
-                    battery?.let { Pill(it, color = if (batteryLow) HeartLinkColors.Pink else Color.LightGray) }
+            Text(
+                name,
+                color = Color.White,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(10.dp))
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (status != PartnerStatus.Unknown) {
+                    val tint = statusColor(status)
+                    InfoChip(statusText, textColor = tint, background = tint.copy(alpha = 0.15f)) {
+                        Box(Modifier.size(8.dp).background(tint, CircleShape))
+                    }
                 }
+                localTimeText(presence?.timeZone, now)?.let { time ->
+                    InfoChip(time, secondary = timeDifferenceText(presence?.timeZone, now)) {
+                        ChipIcon(R.drawable.ic_schedule)
+                    }
+                }
+                // With no connection the status chip already says how long; don't repeat it.
+                presence?.phoneBattery?.let { BatteryChip(R.drawable.ic_smartphone, it, now, showAge = !disconnected) }
+                // Their watch status is unknown too when their phone can't be reached.
+                if (!disconnected) WatchChip(presence, now)
             }
             if (disconnected) {
                 Spacer(Modifier.height(10.dp))
@@ -755,6 +777,73 @@ private fun BeatingHeart(bpm: Int?, color: Color, size: Dp, dim: Boolean = false
                 .scale(scale),
         )
     }
+}
+
+/** One chip style for everything in the partner card's header: same height, icon, text. */
+@Composable
+private fun InfoChip(
+    text: String,
+    textColor: Color = Color.LightGray,
+    background: Color = ChipColor,
+    secondary: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    leading: @Composable () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .height(32.dp)
+            .background(background, RoundedCornerShape(50))
+            .padding(horizontal = 12.dp),
+    ) {
+        leading()
+        Text(text, color = textColor, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        trailing?.invoke()
+        secondary?.let { Text(it, color = Color.Gray, fontSize = 13.sp, maxLines = 1) }
+    }
+}
+
+@Composable
+private fun ChipIcon(res: Int, tint: Color = Color.Gray) {
+    Icon(painterResource(res), contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
+}
+
+/**
+ * The partner's watch: its battery while their phone can reach it, "not connected" (and for how
+ * long) when it can't. Phones from before this was reported only show the battery.
+ */
+@Composable
+private fun WatchChip(presence: Presence?, now: Long) {
+    val link = presence?.watch
+    val battery = presence?.watchBattery
+    when {
+        link == null -> battery?.let { BatteryChip(R.drawable.ic_watch, it, now) }
+        link.connected && battery != null -> BatteryChip(R.drawable.ic_watch, battery, now)
+        link.connected -> InfoChip("connected") { ChipIcon(R.drawable.ic_watch) }
+        else -> InfoChip(
+            "not connected",
+            textColor = Color.Gray,
+            secondary = link.since?.let { durationText(now - it) },
+        ) { ChipIcon(R.drawable.ic_watch, tint = Color.DarkGray) }
+    }
+}
+
+@Composable
+private fun BatteryChip(icon: Int, battery: BatteryState, now: Long, showAge: Boolean = true) {
+    val color = if (battery.isLow) HeartLinkColors.Pink else Color.LightGray
+    // Only mention the age once it's old enough to matter.
+    val age = battery.updatedAt?.let { now - it }?.takeIf { showAge && it > TimeUnit.HOURS.toMillis(1) }
+    InfoChip(
+        "${battery.level}%",
+        textColor = color,
+        secondary = age?.let { durationText(it) },
+        trailing = if (battery.charging) {
+            { Icon(painterResource(R.drawable.ic_bolt), contentDescription = "charging", tint = color, modifier = Modifier.size(14.dp)) }
+        } else {
+            null
+        },
+    ) { ChipIcon(icon, tint = if (battery.isLow) HeartLinkColors.Pink else Color.Gray) }
 }
 
 @Composable

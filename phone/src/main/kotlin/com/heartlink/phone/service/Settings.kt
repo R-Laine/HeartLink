@@ -1,7 +1,9 @@
 package com.heartlink.phone.service
 
 import android.content.Context
+import com.heartlink.shared.HapticStrength
 import com.heartlink.shared.QuietHours
+import com.heartlink.shared.Vibration
 
 /** Per-device preferences. Kept apart from the session so they survive unlinking. */
 object Settings {
@@ -68,6 +70,41 @@ object Settings {
 
     fun lastHomeArrival(ctx: Context): Long = prefs(ctx).getLong("last_home_arrival", 0L)
     fun setLastHomeArrival(ctx: Context, value: Long) = prefs(ctx).edit().putLong("last_home_arrival", value).apply()
+
+    /** How received heartbeats vibrate, on this phone and on its watch. */
+    fun hapticStrength(ctx: Context): HapticStrength = HapticStrength.fromName(prefs(ctx).getString("haptic_strength", null))
+    fun setHapticStrength(ctx: Context, value: HapticStrength) = prefs(ctx).edit().putString("haptic_strength", value.name).apply()
+
+    fun hapticBeats(ctx: Context): Int = prefs(ctx).getInt("haptic_beats", Vibration.DEFAULT_BEATS)
+    fun setHapticBeats(ctx: Context, value: Int) = prefs(ctx).edit().putInt("haptic_beats", value).apply()
+
+    /** Play heartbeats that arrived silently during quiet hours once quiet hours are over. */
+    fun replayAfterQuiet(ctx: Context): Boolean = prefs(ctx).getBoolean("replay_after_quiet", true)
+    fun setReplayAfterQuiet(ctx: Context, value: Boolean) = prefs(ctx).edit().putBoolean("replay_after_quiet", value).apply()
+
+    /** Heartbeats held back during quiet hours: how many, the latest bpm and sender, and when the first arrived. */
+    data class PendingReplay(val count: Int, val bpm: Int, val fromName: String?, val firstAt: Long)
+
+    fun pendingReplay(ctx: Context): PendingReplay? {
+        val p = prefs(ctx)
+        val count = p.getInt("replay_count", 0)
+        if (count <= 0) return null
+        return PendingReplay(count, p.getInt("replay_bpm", 70), p.getString("replay_from", null), p.getLong("replay_first", 0L))
+    }
+
+    fun addPendingReplay(ctx: Context, bpm: Int, fromName: String?, at: Long) {
+        val existing = pendingReplay(ctx)
+        prefs(ctx).edit()
+            .putInt("replay_count", (existing?.count ?: 0) + 1)
+            .putInt("replay_bpm", bpm)
+            .putString("replay_from", fromName)
+            .putLong("replay_first", existing?.firstAt ?: at)
+            .apply()
+    }
+
+    fun clearPendingReplay(ctx: Context) {
+        prefs(ctx).edit().remove("replay_count").remove("replay_bpm").remove("replay_from").remove("replay_first").apply()
+    }
 
     /** Timestamp of the last buzz we vibrated for, so each one plays once. */
     fun lastHandledBuzz(ctx: Context): Long = prefs(ctx).getLong(KEY_LAST_BUZZ, 0L)

@@ -30,15 +30,11 @@ import androidx.compose.ui.unit.sp
 import com.heartlink.shared.Messages
 import com.heartlink.shared.PartnerStatus
 
+fun statusColor(status: PartnerStatus): Color = com.heartlink.shared.HeartLinkColors.forStatus(status)
+
 @Composable
 fun StatusLabel(status: PartnerStatus, text: String = status.label) {
-    val color = when (status) {
-        PartnerStatus.Online -> Color(0xFF4CD964)
-        PartnerStatus.Inactive -> Color(0xFFFFCC00)
-        PartnerStatus.Away -> Color(0xFFFF9F43)
-        PartnerStatus.Asleep -> Color(0xFF8E8EF0)
-        PartnerStatus.NoConnection, PartnerStatus.Unknown -> Color.Gray
-    }
+    val color = statusColor(status)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier

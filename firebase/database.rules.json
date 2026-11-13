@@ -120,6 +120,18 @@
                 ".validate": false
               }
             },
+            "watch": {
+              ".validate": "newData.hasChildren(['connected', 'ts'])",
+              "connected": {
+                ".validate": "newData.isBoolean()"
+              },
+              "ts": {
+                ".validate": "newData.isNumber() && newData.val() <= now + 60000"
+              },
+              "$other": {
+                ".validate": false
+              }
+            },
             "$other": {
               ".validate": false
             }
