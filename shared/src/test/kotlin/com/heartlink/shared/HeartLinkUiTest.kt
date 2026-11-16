@@ -211,7 +211,7 @@ class HeartLinkUiTest {
         // The two halves count as one night when checking when it really ended.
         assertEquals(listOf(FinishedSleep(first.start, second.end)), SleepModel.mergeSleeps(listOf(second, first)))
         // A nap hours later is its own sleep.
-        val nap = FinishedSleep(minutesAgo(5), now + 60 * 60_000L)
+        val nap = FinishedSleep(second.end + 3 * 60 * 60_000L, second.end + 4 * 60 * 60_000L)
         assertEquals(2, SleepModel.mergeSleeps(listOf(first, second, nap)).size)
     }
 
