@@ -35,9 +35,13 @@ fun isQuiet(quiet: QuietHours?, timeZone: String?, now: Long, asleep: Boolean, o
     if (quiet == null || !quiet.enabled) return false
     if (quiet.allowWhenOnline && online) return false
     if (asleep) return true
+    return quiet.contains(minuteOfDay(timeZone, now))
+}
+
+private fun minuteOfDay(timeZone: String?, at: Long): Int {
     val zone = timeZone?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: ZoneId.systemDefault()
-    val time = Instant.ofEpochMilli(now).atZone(zone).toLocalTime()
-    return quiet.contains(time.hour * 60 + time.minute)
+    val time = Instant.ofEpochMilli(at).atZone(zone).toLocalTime()
+    return time.hour * 60 + time.minute
 }
 
 /** "23:00" / "11:00 PM", following this device's 12/24-hour style. */

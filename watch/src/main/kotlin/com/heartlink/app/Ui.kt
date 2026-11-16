@@ -59,6 +59,7 @@ import com.heartlink.shared.Battery
 import com.heartlink.shared.BatteryState
 import com.heartlink.shared.HeartLinkColors
 import com.heartlink.shared.HeartRepository
+import com.heartlink.shared.SendResult
 import com.heartlink.shared.LIVE_THRESHOLD_MS
 import com.heartlink.shared.PartnerStatus
 import com.heartlink.shared.Presence
@@ -68,6 +69,7 @@ import com.heartlink.shared.beatPeriodMs
 import com.heartlink.shared.countdownText
 import com.heartlink.shared.heartbeatScale
 import com.heartlink.shared.isQuiet
+import com.heartlink.shared.isAsleep
 import com.heartlink.shared.localTimeText
 import com.heartlink.shared.partnerStatus
 import com.heartlink.shared.statusLabel
@@ -86,6 +88,8 @@ fun HeartLinkApp(
     session: Session?,
     myBpm: Int?,
     setupNote: String?,
+    sleepWarning: SleepWarning?,
+    onFixSleep: () -> Unit,
     onLinked: (Session) -> Unit,
     onUnlink: () -> Unit,
 ) {
@@ -94,7 +98,7 @@ fun HeartLinkApp(
             modifier = Modifier.fillMaxSize().background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
-            if (session == null) WatchSetup(note = setupNote, onDone = onLinked) else HeartScreen(session, myBpm, onUnlink)
+            if (session == null) WatchSetup(note = setupNote, onDone = onLinked) else HeartScreen(session, myBpm, sleepWarning, onFixSleep, onUnlink)
         }
     }
 }
@@ -123,7 +127,7 @@ fun CrashReport(report: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun HeartScreen(session: Session, myBpm: Int?, onUnlink: () -> Unit) {
+private fun HeartScreen(session: Session, myBpm: Int?, sleepWarning: SleepWarning?, onFixSleep: () -> Unit, onUnlink: () -> Unit) {
     val id = session.coupleId
     val members by remember(id) { HeartRepository.observeMembers(id) }
         .collectAsStateWithLifecycle(initialValue = emptyMap())
@@ -265,9 +269,11 @@ private fun HeartScreen(session: Session, myBpm: Int?, onUnlink: () -> Unit) {
                         onClick = {
                             scope.launch {
                                 val bpm = myBpm ?: DEFAULT_BUZZ_BPM
-                                runCatching { HeartRepository.sendBuzz(session, bpm, myName) }
-                                    .onSuccess { sentNote = "Sent ♥" }
-                                    .onFailure { sentNote = "Couldn't send" }
+                                sentNote = when (HeartRepository.trySend { HeartRepository.sendBuzz(session, bpm, myName) }) {
+                                    SendResult.Sent -> "Sent ♥"
+                                    SendResult.Queued -> "Waiting for connection"
+                                    SendResult.Failed -> "Couldn't send"
+                                }
                             }
                         },
                         colors = ChipDefaults.primaryChipColors(
@@ -297,6 +303,18 @@ private fun HeartScreen(session: Session, myBpm: Int?, onUnlink: () -> Unit) {
                         color = Color.Gray,
                         fontSize = 12.sp,
                     )
+                }
+            }
+
+            // Why the partner won't see when this person is asleep.
+            sleepWarning?.let { warning ->
+                item {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(warning.text, color = HeartLinkColors.Pink, fontSize = 11.sp, textAlign = TextAlign.Center)
+                        if (warning == SleepWarning.NeedsPermission) {
+                            CompactChip(label = { Text("Allow") }, onClick = onFixSleep, colors = ChipDefaults.secondaryChipColors())
+                        }
+                    }
                 }
             }
 
@@ -371,18 +389,36 @@ private fun batteryText(battery: BatteryState, now: Long): String =
 private fun lowColor(battery: BatteryState): Color = if (battery.isLow) HeartLinkColors.Pink else DetailColor
 
 private fun partnerIsQuiet(p: Presence, now: Long): Boolean {
-    val asleepAt = p.asleepAt
     return isQuiet(
         quiet = p.quietHours,
         timeZone = p.timeZone,
         now = now,
-        asleep = p.asleep && asleepAt != null && now - asleepAt < StatusRules.ASLEEP_STALE_MS,
+        asleep = p.isAsleep(now),
         online = partnerStatus(p, null, now) == PartnerStatus.Online,
     )
 }
 
 @Composable
 private fun BeatingHeart(bpm: Int?, color: Color, size: Dp) {
+    // A still heart doesn't need a frame every 16 ms: only animate while there's a beat to show.
+    val scale = if (bpm != null) beatScale(bpm) else 1f
+    Icon(
+        painterResource(R.drawable.ic_heart),
+        contentDescription = null,
+        tint = color,
+        modifier = Modifier.size(size).scale(scale),
+    )
+}
+
+/** Why sleep isn't being shared from this watch. */
+enum class SleepWarning(val text: String) {
+    NeedsPermission("Sleep isn't shared: allow physical activity"),
+    Unsupported("This watch can't detect sleep, so it isn't shared"),
+}
+
+/** The heart's size right now, beating at [bpm]. */
+@Composable
+private fun beatScale(bpm: Int): Float {
     val transition = rememberInfiniteTransition(label = "beat")
     val progress by transition.animateFloat(
         initialValue = 0f,
@@ -390,11 +426,5 @@ private fun BeatingHeart(bpm: Int?, color: Color, size: Dp) {
         animationSpec = infiniteRepeatable(tween(beatPeriodMs(bpm), easing = LinearEasing)),
         label = "progress",
     )
-    val scale = if (bpm != null) heartbeatScale(progress) else 1f
-    Icon(
-        painterResource(R.drawable.ic_heart),
-        contentDescription = null,
-        tint = color,
-        modifier = Modifier.size(size).scale(scale),
-    )
+    return heartbeatScale(progress, beatPeriodMs(bpm))
 }

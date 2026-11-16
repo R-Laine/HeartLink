@@ -13,11 +13,19 @@ data class Presence(
     val connected: Boolean = false,
     /** Last time we heard from them at all (server time). */
     val lastSeen: Long? = null,
-    /** Last screen-on / unlock / app use. */
+    /** Last direct use of their phone or watch: unlocked phone, the watch app, a charging cable (see [ActivityModel]). */
     val lastActive: Long? = null,
+    /** Last time their phone saw them on the move (walking, cycling, in a vehicle). */
+    val movingAt: Long? = null,
+    /** Last time they were on a call (reported every 5 minutes during one). Not counted as use. */
+    val callAt: Long? = null,
     /** Set by their watch from Wear OS sleep detection. */
     val asleep: Boolean = false,
     val asleepAt: Long? = null,
+    /** When their current stretch of phone use started, if it started while the watch said asleep. */
+    val wokeAt: Long? = null,
+    /** The sleep verdict their own phone published from every source it has (see [SleepModel]). */
+    val sleep: SleepDecision? = null,
     /** IANA time zone, e.g. "Europe/London". */
     val timeZone: String? = null,
     val phoneBattery: BatteryState? = null,
@@ -48,34 +56,101 @@ object StatusRules {
     /** No phone/screen activity for this long → away. */
     val AWAY_AFTER_MS: Long = TimeUnit.HOURS.toMillis(1)
 
+    /** On the move this recently → inactive rather than away. Longer than [MOVING_REPORT_MS], so it doesn't flicker. */
+    val MOVING_RECENT_MS: Long = TimeUnit.MINUTES.toMillis(15)
+
     /** A watch upload this recent proves the person is reachable even if their phone isn't. */
     val RECENT_BEAT_MS: Long = TimeUnit.MINUTES.toMillis(3)
 
     /** Ignore a sleep flag older than this (a watch that died while they slept). */
     val ASLEEP_STALE_MS: Long = TimeUnit.HOURS.toMillis(14)
+
+    /** Using the phone this long in total, while the watch says asleep, means they're up, not just stirring. */
+    val WAKE_CONFIRM_MS: Long = TimeUnit.MINUTES.toMillis(15)
+
+    /**
+     * Uses of the phone or watch less than this apart belong to one spell of being awake, so a
+     * shower or making breakfast doesn't end it. After this long with nothing used, "woke up" goes
+     * back to asleep.
+     */
+    val WAKE_GAP_MS: Long = TimeUnit.MINUTES.toMillis(30)
+
+    /** A spell of being awake that has lasted this long (with repeated use) means they're up. */
+    val WAKE_SPAN_MS: Long = TimeUnit.MINUTES.toMillis(45)
+
+    /** How much use one "in use" signal stands for: the phone reports use about once a minute. */
+    val USE_TICK_MS: Long = TimeUnit.MINUTES.toMillis(1)
+
+    /**
+     * After this much sleep, picking up the phone is much more likely to be getting up than
+     * stirring, so less use confirms it ([RESTED_WAKE_CONFIRM_MS], [RESTED_WAKE_SPAN_MS]).
+     */
+    val FULL_SLEEP_MS: Long = TimeUnit.HOURS.toMillis(6)
+    val RESTED_WAKE_CONFIRM_MS: Long = TimeUnit.MINUTES.toMillis(5)
+    val RESTED_WAKE_SPAN_MS: Long = TimeUnit.MINUTES.toMillis(20)
+
+    // The four WAKE_* values above are starting points: each person's phone tunes its own copy
+    // from how its guesses compared with the night as recorded (see SleepTuning, SleepLearning).
+}
+
+/** Where someone is in their sleep, combining every source in [SleepModel]. */
+enum class SleepState(val key: String) {
+    Awake("awake"),
+
+    /** The watch says asleep and nothing has shown otherwise (or they went back to sleep). */
+    Asleep("asleep"),
+
+    /** The watch still says asleep, but they're using their phone right now: up in the night, or just woken. */
+    WokeUp("wokeUp"),
+    ;
+
+    companion object {
+        fun fromKey(key: String?): SleepState? = entries.firstOrNull { it.key == key }
+    }
+}
+
+/** Where someone is in their sleep. Decided by [SleepModel]; see [Presence.sleepDecision]. */
+fun Presence.sleepState(now: Long): SleepState = sleepDecision(now).state
+
+/**
+ * Asleep right now, for quiet hours: not while they're up using their phone. Someone who stirred
+ * but put their phone down again counts as asleep after [StatusRules.INACTIVE_AFTER_MS], even
+ * though their partner still sees "woke up" for a while.
+ */
+fun Presence.isAsleep(now: Long): Boolean = sleepDecision(now).isAsleep(now)
+
+/** See [Presence.isAsleep]. */
+fun SleepDecision.isAsleep(now: Long): Boolean {
+    val current = at(now)
+    return when (current.state) {
+        SleepState.Asleep -> true
+        SleepState.WokeUp -> now - (current.lastUse ?: 0L) >= StatusRules.INACTIVE_AFTER_MS
+        SleepState.Awake -> false
+    }
 }
 
 /**
  * no connection – can't reach any of their devices (phone disconnected, no recent watch reading)
- * asleep        – their watch says they're asleep
- * away          – reachable, but no sign of use for over an hour
- * inactive      – reachable, but no sign of use for 10 minutes
- * online        – reachable and recently active
+ * asleep        – their watch says they're asleep (see [sleepState])
+ * inactive      – stirring: their watch says asleep and they've used a device in the last
+ *                 30 minutes, but not enough to count as up ([SleepState.WokeUp])
+ * online / inactive / away – awake: decided by [ActivityModel]
  */
 fun partnerStatus(presence: Presence?, lastBeat: Reading?, now: Long): PartnerStatus {
     val recentBeat = lastBeat != null && lastBeat.source != Sources.TEST &&
         now - lastBeat.timestamp < StatusRules.RECENT_BEAT_MS
     if (presence == null) return if (recentBeat) PartnerStatus.Online else PartnerStatus.Unknown
     if (!presence.connected && !recentBeat) return PartnerStatus.NoConnection
-    val asleepAt = presence.asleepAt
-    if (presence.asleep && asleepAt != null && now - asleepAt < StatusRules.ASLEEP_STALE_MS) return PartnerStatus.Asleep
-    // A watch reading only shows they're wearing it, not that they're using anything.
-    val lastActive = presence.lastActive ?: 0L
-    val idle = now - lastActive
-    return when {
-        idle > StatusRules.AWAY_AFTER_MS -> PartnerStatus.Away
-        idle > StatusRules.INACTIVE_AFTER_MS -> PartnerStatus.Inactive
-        else -> PartnerStatus.Online
+    when (presence.sleepState(now)) {
+        SleepState.Asleep -> return PartnerStatus.Asleep
+        // Stirring in the night isn't really being up, so it doesn't show as online.
+        SleepState.WokeUp -> return PartnerStatus.Inactive
+        SleepState.Awake -> Unit
+    }
+    return when (presence.activityDecision(now).level) {
+        ActivityLevel.Online -> PartnerStatus.Online
+        ActivityLevel.Inactive -> PartnerStatus.Inactive
+        ActivityLevel.Away -> PartnerStatus.Away
     }
 }
 

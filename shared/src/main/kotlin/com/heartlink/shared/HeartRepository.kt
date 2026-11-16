@@ -15,12 +15,16 @@ import com.google.firebase.database.database
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onEach
@@ -61,6 +65,17 @@ object HeartRepository {
     private val PARTNER_INVITE_TTL_MS = TimeUnit.DAYS.toMillis(7)
     val DEVICE_INVITE_TTL_MS = TimeUnit.MINUTES.toMillis(15)
     private val SIGN_IN_RETRY_MS = TimeUnit.SECONDS.toMillis(5)
+    private val SEND_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(15)
+    private val OFFSET_WAIT_MS = TimeUnit.SECONDS.toMillis(2)
+    private val SAMPLE_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(30)
+
+    /** Buzz bpm limits; the database rules refuse anything outside them. */
+    private const val BUZZ_MIN_BPM = 20
+    private const val BUZZ_MAX_BPM = 250
+
+    /** Pause before listening again after the database refuses a listener (doubles up to the max). */
+    private val LISTEN_RETRY_MIN_MS = TimeUnit.SECONDS.toMillis(5)
+    private val LISTEN_RETRY_MAX_MS = TimeUnit.MINUTES.toMillis(2)
 
     private val lastWrite = AtomicLong(0L)
 
@@ -220,10 +235,23 @@ object HeartRepository {
         ref.setValue(mapOf("role" to session.role)).await()
     }
 
-    /** Removes this device's access. Other devices and the partner are unaffected. */
-    suspend fun leave(session: Session) {
+    /**
+     * Removes this device's access, along with [watchUids]: this person's watches that this phone
+     * linked, so they stop sharing too. Other devices and the partner are unaffected.
+     */
+    suspend fun leave(session: Session, watchUids: Collection<String> = emptyList()) {
         val uid = ensureSignedIn()
-        couple(session.coupleId).child("devices").child(uid).removeValue().await()
+        val devices = couple(session.coupleId).child("devices")
+        val updates = mutableMapOf<String, Any?>(uid to null)
+        if (watchUids.isNotEmpty()) {
+            // Only watches still listed for this seat: removing a missing entry is refused, and
+            // that would fail the whole write, including this phone's own removal.
+            val listed = devices.get().await()
+            watchUids
+                .filter { it != uid && listed.child(it).child("role").getValue(String::class.java) == session.role }
+                .forEach { updates[it] = null }
+        }
+        devices.updateChildren(updates).await()
     }
 
     // ---- Heartbeats ----------------------------------------------------------------------
@@ -253,18 +281,21 @@ object HeartRepository {
     }
 
     /**
-     * Uploads a reading measured at [timestampMs] (e.g. from Health Connect), but only if it is
-     * newer than what is already stored, so it never replaces fresher live watch data.
+     * Uploads a reading measured at [timestampMs] (this device's clock, e.g. from Health Connect
+     * or a watch's background batch), but only if it is newer than what is already stored, so it
+     * never replaces fresher live watch data. Stored in server time, like live readings: that's
+     * what readers compare it with, and the rules refuse a time ahead of the server's.
      */
     suspend fun uploadSample(session: Session, bpm: Int, timestampMs: Long, source: String): Boolean {
         ensureSignedIn()
+        val ts = toServerTime(timestampMs).coerceAtMost(serverNow())
         val ref = beat(session)
         return suspendCancellableCoroutine { cont ->
             ref.runTransaction(object : Transaction.Handler {
                 override fun doTransaction(current: MutableData): Transaction.Result {
                     val existingTs = current.child("ts").getValue(Long::class.java)
-                    if (existingTs != null && existingTs >= timestampMs) return Transaction.abort()
-                    current.value = mapOf("bpm" to bpm, "ts" to timestampMs, "source" to source)
+                    if (existingTs != null && existingTs >= ts) return Transaction.abort()
+                    current.value = mapOf("bpm" to bpm, "ts" to ts, "source" to source)
                     return Transaction.success(current)
                 }
 
@@ -272,6 +303,26 @@ object HeartRepository {
                     if (error != null) cont.resumeWithException(error.toException()) else cont.resume(committed)
                 }
             })
+        }
+    }
+
+    /**
+     * Uploads a reading the watch measured at [measuredAt] (its own clock). Background readings
+     * arrive in batches that can be minutes old: those keep their own time, so they aren't shown
+     * as live. A fresh one gets server time, like live readings.
+     */
+    suspend fun uploadMeasured(session: Session, bpm: Int, measuredAt: Long): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - measuredAt < LIVE_THRESHOLD_MS) return upload(session, bpm, force = true)
+        return try {
+            withTimeoutOrNull(SAMPLE_TIMEOUT_MS) {
+                uploadSample(session, bpm, measuredAt, Sources.WATCH)
+            } == true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Upload failed", e)
+            false
         }
     }
 
@@ -316,7 +367,22 @@ object HeartRepository {
      * Add it to [System.currentTimeMillis] before comparing against server timestamps.
      */
     fun serverTimeOffset(): Flow<Long> =
-        valueFlow(database.getReference(".info/serverTimeOffset")) { it.getValue(Long::class.java) ?: 0L }
+        valueFlow(database.getReference(".info/serverTimeOffset")) { snap ->
+            (snap.getValue(Long::class.java) ?: 0L).also { knownOffset = it }
+        }
+
+    @Volatile
+    private var knownOffset: Long? = null
+
+    /**
+     * This device's clock corrected to Firebase server time, as far as it's known. Use it for
+     * timestamps written by the client and when comparing them, so a phone whose clock is off
+     * neither has its writes refused nor misjudges how old something is.
+     */
+    suspend fun serverNow(): Long {
+        val offset = knownOffset ?: withTimeoutOrNull(OFFSET_WAIT_MS) { serverTimeOffset().first() } ?: 0L
+        return System.currentTimeMillis() + offset
+    }
 
     // ---- Presence, messages, buzzes ------------------------------------------------------
 
@@ -343,20 +409,80 @@ object HeartRepository {
                 }
             }
 
-    /** Records that this person just used their phone or watch. */
-    suspend fun markActive(session: Session) {
+    /**
+     * Records that this person just used their phone or watch. [known] is their presence if the
+     * caller already listens to it, which saves a round trip to the database every minute.
+     */
+    suspend fun markActive(session: Session, known: Presence? = null) {
+        ensureSignedIn()
+        val ref = presence(session.coupleId, session.role)
+        val updates = mutableMapOf<String, Any>("lastActive" to ServerValue.TIMESTAMP, "lastSeen" to ServerValue.TIMESTAMP)
+        // While the watch says asleep, note when each stretch of phone use starts, so the partner
+        // sees "woke up" and then "asleep" again, or awake if it goes on (see sleepState). The
+        // watch's sleep flag is left alone: it only reports changes, so it can't be cleared here.
+        val current = known ?: runCatching { ref.get().await() }.getOrNull()?.let { snap ->
+            Presence(
+                asleep = snap.child("asleep").getValue(Boolean::class.java) == true,
+                asleepAt = snap.child("asleepAt").getValue(Long::class.java),
+                lastActive = snap.child("lastActive").getValue(Long::class.java),
+                wokeAt = snap.child("wokeAt").getValue(Long::class.java),
+            )
+        }
+        current?.run {
+            // lastActive is server time, so compare it with server time.
+            val newStretch = lastActive == null || toServerTime(System.currentTimeMillis()) - lastActive > StatusRules.INACTIVE_AFTER_MS
+            val stretchFromBeforeSleep = asleepAt != null && (wokeAt == null || wokeAt < asleepAt)
+            if (asleep && (newStretch || stretchFromBeforeSleep)) updates["wokeAt"] = ServerValue.TIMESTAMP
+        }
+        ref.updateChildren(updates).await()
+    }
+
+    /** Records that this person is on a call. Kept apart from lastActive: a call isn't use (see [ActivityModel]). */
+    suspend fun markOnCall(session: Session) {
         ensureSignedIn()
         presence(session.coupleId, session.role)
-            .updateChildren(mapOf("lastActive" to ServerValue.TIMESTAMP, "lastSeen" to ServerValue.TIMESTAMP))
+            .updateChildren(mapOf("callAt" to ServerValue.TIMESTAMP, "lastSeen" to ServerValue.TIMESTAMP))
             .await()
     }
 
-    /** Called by the watch when Wear OS detects sleep starting or ending. */
-    suspend fun setAsleep(session: Session, asleep: Boolean) {
+    /** Records that this person is on the move with their phone (see [ActivityModel]). */
+    suspend fun markMoving(session: Session) {
         ensureSignedIn()
         presence(session.coupleId, session.role)
+            .updateChildren(mapOf("movingAt" to ServerValue.TIMESTAMP, "lastSeen" to ServerValue.TIMESTAMP))
+            .await()
+    }
+
+    /** Publishes this person's sleep verdict, decided by their own phone (see [SleepModel]). */
+    suspend fun publishSleep(session: Session, decision: SleepDecision) {
+        ensureSignedIn()
+        val value = buildMap<String, Any> {
+            put("state", decision.state.key)
+            put("reason", decision.reason.key)
+            put("at", ServerValue.TIMESTAMP)
+            decision.since?.let { put("since", it) }
+            decision.basis?.let { put("basis", it) }
+            decision.lastUse?.let { put("lastUse", it) }
+        }
+        presence(session.coupleId, session.role).child("sleep").setValue(value).await()
+    }
+
+    /** This device's clock time [at] in server time, using the offset if it's known yet. */
+    fun toServerTime(at: Long): Long = at + (knownOffset ?: 0L)
+
+    /** Server time [at] on this device's clock: the reverse of [toServerTime]. */
+    fun toDeviceTime(at: Long): Long = at - (knownOffset ?: 0L)
+
+    /** Called by the watch when Wear OS detects sleep starting or ending. */
+    /** [at] is when the change happened (a report can be sent late); server time if null. */
+    suspend fun setAsleep(session: Session, asleep: Boolean, at: Long? = null) {
+        ensureSignedIn()
+        // In server time, like lastActive and wokeAt, which it's compared with.
+        val offset = knownOffset ?: withTimeoutOrNull(OFFSET_WAIT_MS) { serverTimeOffset().first() } ?: 0L
+        val changedAt: Any = at?.let { (it + offset).coerceAtMost(System.currentTimeMillis() + offset) } ?: ServerValue.TIMESTAMP
+        presence(session.coupleId, session.role)
             .updateChildren(
-                mapOf("asleep" to asleep, "asleepAt" to ServerValue.TIMESTAMP, "lastSeen" to ServerValue.TIMESTAMP),
+                mapOf("asleep" to asleep, "asleepAt" to changedAt, "lastSeen" to ServerValue.TIMESTAMP),
             )
             .await()
     }
@@ -370,8 +496,12 @@ object HeartRepository {
                     connected = snap.child("connected").getValue(Boolean::class.java) == true,
                     lastSeen = snap.child("lastSeen").getValue(Long::class.java),
                     lastActive = snap.child("lastActive").getValue(Long::class.java),
+                    movingAt = snap.child("movingAt").getValue(Long::class.java),
+                    callAt = snap.child("callAt").getValue(Long::class.java),
                     asleep = snap.child("asleep").getValue(Boolean::class.java) == true,
                     asleepAt = snap.child("asleepAt").getValue(Long::class.java),
+                    wokeAt = snap.child("wokeAt").getValue(Long::class.java),
+                    sleep = parseSleep(snap.child("sleep")),
                     timeZone = snap.child("tz").getValue(String::class.java),
                     phoneBattery = parseBattery(snap.child("battery").child(Devices.PHONE)),
                     watchBattery = parseBattery(snap.child("battery").child(Devices.WATCH)),
@@ -386,6 +516,19 @@ object HeartRepository {
                 )
             }
         }
+
+    private fun parseSleep(snap: DataSnapshot): SleepDecision? {
+        if (!snap.exists()) return null
+        val state = SleepState.fromKey(snap.child("state").getValue(String::class.java)) ?: return null
+        return SleepDecision(
+            state = state,
+            since = snap.child("since").getValue(Long::class.java),
+            basis = snap.child("basis").getValue(Long::class.java),
+            lastUse = snap.child("lastUse").getValue(Long::class.java),
+            reason = SleepReason.fromKey(snap.child("reason").getValue(String::class.java)),
+            decidedAt = snap.child("at").getValue(Long::class.java),
+        )
+    }
 
     /** Uploads this device's battery for the partner to see. [device] is [Devices.PHONE] or [Devices.WATCH]. */
     suspend fun reportBattery(session: Session, device: String, state: BatteryState) {
@@ -492,12 +635,17 @@ object HeartRepository {
         couple(session.coupleId).child("messages").child(session.role).child(messageId).removeValue().await()
     }
 
-    /** Makes the partner's watch (or phone) vibrate with [bpm], this person's last known heart rate. */
+    /**
+     * Makes the partner's watch (or phone) vibrate with [bpm], this person's last known heart rate.
+     * Stamped with when it was sent (server-corrected), not when it reached the server: a buzz
+     * queued offline and delivered much later would otherwise vibrate as if it were new. The
+     * receiver shows a late one silently instead.
+     */
     suspend fun sendBuzz(session: Session, bpm: Int, fromName: String?) {
         ensureSignedIn()
         val value = buildMap {
-            put("bpm", bpm)
-            put("ts", ServerValue.TIMESTAMP)
+            put("bpm", bpm.coerceIn(BUZZ_MIN_BPM, BUZZ_MAX_BPM))
+            put("ts", serverNow())
             fromName?.let { put("from", it) }
         }
         couple(session.coupleId).child("buzz").child(session.partnerRole).setValue(value).await()
@@ -523,6 +671,20 @@ object HeartRepository {
 
     // ---- Helpers -------------------------------------------------------------------------
 
+    /**
+     * Runs a send, giving up waiting after [SEND_TIMEOUT_MS]. Offline, Firebase holds a write
+     * until it reconnects instead of failing, which left "Send" with no answer at all. The write
+     * stays queued, so [SendResult.Queued] means "will go when back online" (while the app runs).
+     */
+    suspend fun trySend(block: suspend () -> Unit): SendResult = try {
+        if (withTimeoutOrNull(SEND_TIMEOUT_MS) { block() } == null) SendResult.Queued else SendResult.Sent
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "Send failed", e)
+        SendResult.Failed
+    }
+
     private fun inviteValue(coupleId: String, role: String, ttlMs: Long, fromName: String?, seatName: String?) =
         buildMap {
             put("couple", coupleId)
@@ -540,6 +702,8 @@ object HeartRepository {
             try {
                 write(code)
                 return code
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 lastError = e
             }
@@ -549,10 +713,24 @@ object HeartRepository {
 
     /**
      * Never throws to collectors: screens collect these directly, and an exception there closes
-     * the app. Sign-in is retried until it works (e.g. a watch with no connection yet), and a
-     * refused listener just stops, flagging [accessDenied] if this device isn't in the couple.
+     * the app. Sign-in is retried until it works (e.g. a watch with no connection yet). A refused
+     * listener flags [accessDenied] and then listens again after a pause: a refusal can be
+     * temporary (signing in, a token refresh), and a listener that just stopped left the screen
+     * showing old data until the app was restarted.
      */
-    private fun <T> valueFlow(ref: DatabaseReference, map: (DataSnapshot) -> T): Flow<T> = callbackFlow {
+    private fun <T> valueFlow(ref: DatabaseReference, map: (DataSnapshot) -> T): Flow<T> = flow {
+        var retryMs = LISTEN_RETRY_MIN_MS
+        while (true) {
+            var received = false
+            emitAll(listenOnce(ref, map).onEach { received = true })
+            if (received) retryMs = LISTEN_RETRY_MIN_MS
+            delay(retryMs)
+            retryMs = (retryMs * 2).coerceAtMost(LISTEN_RETRY_MAX_MS)
+        }
+    }.conflate()
+
+    /** One listener on [ref]; completes if the database cancels it. */
+    private fun <T> listenOnce(ref: DatabaseReference, map: (DataSnapshot) -> T): Flow<T> = callbackFlow {
         while (true) {
             try {
                 ensureSignedIn()
@@ -582,5 +760,8 @@ object HeartRepository {
         }
         ref.addValueEventListener(listener)
         awaitClose { ref.removeEventListener(listener) }
-    }.conflate()
+    }
 }
+
+/** Outcome of [HeartRepository.trySend]. */
+enum class SendResult { Sent, Queued, Failed }

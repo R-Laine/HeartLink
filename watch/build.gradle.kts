@@ -39,6 +39,14 @@ android {
         // Libraries ship translations for ~80 languages; the app's own text is English only.
         localeFilters += "en"
     }
+    packaging {
+        // Compress the code in the APK (about 4.7 MB down to about 2 MB). Android 11 and later
+        // store it uncompressed by default so it can run straight from the APK; compressed, it
+        // is unpacked once when installed, which uses a little more storage on the watch.
+        dex {
+            useLegacyPackaging = true
+        }
+    }
     buildFeatures {
         compose = true
     }
@@ -70,6 +78,7 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.health.services.client)
+    implementation(libs.work.runtime)
     implementation(libs.guava)
     implementation(libs.play.services.wearable)
     implementation(libs.kotlinx.coroutines.play.services)

@@ -42,7 +42,7 @@ Before starting any of this, finish the device checks under **Release checklist*
 |---|------|--------|-------|
 | 16 | **App icon and splash screen** | S | Adaptive launcher icon, a monochrome themed icon for Android 13 and later, and a splash screen. The phone app's dark theme is done (see **Done**); the setup and settings screens could still use a design pass to match the home screen. |
 | 17 | **Release signing** | S | Release builds are currently signed with the debug key so they install over debug builds. Before publishing, create an upload key and configure `signingConfigs` for both apps with the same key, which the watch needs to link through the phone. Keep the keystore and passwords out of git. Installing builds signed with the new key means uninstalling the debug-signed ones first. |
-| 18 | **Google Play release** | M | Internal testing track first. Needs the Health Connect declaration form, a privacy policy URL, the data safety form, and a justification for the `connectedDevice` background service type. |
+| 18 | **Google Play release** | M | Internal testing track first. Needs the Health Connect declaration form (heart rate and sleep), a privacy policy URL, the data safety form, and a justification for the `connectedDevice` background service type. |
 
 ## Done
 
@@ -56,15 +56,22 @@ Before starting any of this, finish the device checks under **Release checklist*
 | **Haptic settings** | Settings → "Heartbeats you receive": strength (Gentle, Normal, Strong) and length (4, 8, 12 or 16 beats), with a Try it button. Stored on the phone and sent to the watch with each heartbeat (`BuzzPlayback`), so both vibrate the same way. Older phones' plain-bpm messages still play with the defaults. |
 | **Away and "no connection" statuses** | Inactive after 10 minutes without phone use, away after an hour. "Offline" is now "no connection" and shows how long, for example "no connection · 2h 14m", on the phone, the watch and the notification. The partner's card keeps their last known heartbeat (dimmed, labelled "Last known"), local time and battery. |
 | **Home screen redesign** | Dark Material 3 theme. The partner's card fills the screen, with a status chip, local time and per-device battery chips (charging bolt, pink when low), and a heart that scales to the space. Your own stats are replaced by a sharing indicator that says whether your heartbeat is reaching your partner and how to fix it if not. Settings, Add device and Unlink moved to the top bar. |
+| **Waking up, naps and waking briefly** | The watch's sleep detection is slow to notice waking (or never does, if it comes off to charge), so phone use decides, the same way for a night's sleep and a nap. Using your phone or watch while the watch says asleep shows inactive straight away, and asleep again after 30 minutes without using anything (heartbeats go quiet again after 10). Your own phone decides when you're properly up: 15 minutes of use in total, or a spell of use lasting 45 minutes, where breaks under 30 minutes (a shower, breakfast) don't end the spell. After 6 hours of sleep it takes much less: 5 minutes of use, or a 20-minute spell. You then stay awake however long you leave your phone, until the watch reports sleep again. A brief wake doesn't send "awake" and "asleep" notifications. Sleep times from the watch are corrected to server time. While the screen is on, the phone reports activity every minute. |
 | **Partner's watch connection** | Each phone checks every minute whether it can reach its watch and reports changes to `presence/{role}/watch`. The partner's card shows the watch battery while connected, or "not connected · 2h" when not. Also shown on the watch. |
 | **Watch app redesign** | Time at the top, the partner's name and status, their heart and bpm (dimmed and "Last known" with no connection), a Send heartbeat chip, a details panel (their local time, phone and watch battery or connection, check-in, quiet hours), the countdown, and a small "You · 72 bpm" line showing your own watch is measuring. |
 | **Always-on notification can't be swiped away for good** | Android 14 and later let people dismiss even foreground-service notifications; HeartLink posts it straight back. |
-| **Smaller APKs** | `build-apks.bat` builds release versions shrunk with R8, with English-only resources: about 2.3 MB for the phone and 3.9 MB for the watch, down from 14 MB and 31 MB. |
+| **Smaller APKs** | `build-apks.bat` builds release versions shrunk with R8, with English-only resources: about 2.4 MB for the phone and 2.2 MB for the watch (its code is compressed in the APK), down from 14 MB and 31 MB. |
+| **Unlinking and audit fixes** | "Unlink this phone" also removes the watch it set up (one atomic write; the watch is told to forget the link), and refuses to half-unlink when offline. Unlinking on the watch no longer re-pairs straight away: setup offers "Link through phone". Add device only makes codes for your own seat (the rules refuse codes for the partner's seat). Background watch readings keep the time they were measured instead of showing as live. The phone only counts watches with HeartLink installed (`heartlink_watch` capability). Heartbeats are stamped and judged with server-corrected time. Fixed a watch crash when the partner looked while the watch wasn't linked or had no heart-rate permission. |
+| **One activity model** | Online, inactive and away come from one model (`ActivityModel`) fed by every sign of activity: using the phone (unlocked), the watch app, and plugging in or unplugging a charging cable. Phone and video calls (even with the screen off) keep you online if you've used a device in the last hour, otherwise inactive. They never count as being awake, so falling asleep on a call (e.g. a Discord sleep call) still shows asleep, and doesn't let heartbeats through quiet hours. Being on the move (walking, cycling, driving, from Android's activity recognition, with Sleep detection's physical activity access) shows as inactive rather than away. Direct use (not calls or moving) also counts as being awake for the sleep model. Stirring in the night (the sleep model's "woke up") now shows as inactive. |
+| **One sleep model** | Every sleep source (the watch, phone and watch use, Health Connect, the Sleep API) goes into one model (`SleepModel`) that replays the night in order and decides asleep, woke up or awake. Each person's phone publishes its verdict; other devices use it, or run the same model on what they can see if it's out of date. Use history is kept on the phone, so a restart doesn't lose the morning's count. |
+| **Learning your sleep** | Each phone checks its wake-up guesses against the night Health Connect (or the Sleep API) records, about 3 hours after waking, and tunes how much phone use means you're up. It starts after 3 nights, uses the last 14, moves a step at a time within safe limits, and counts saying "awake" too early as worse than too late. Settings → Sleep detection shows how far off the guesses are, compared with the starting settings, and can reset it. Everything stays on the phone. |
+| **Sleep detection sources** | Settings → Sleep detection, both optional. **Sleep from Health Connect**: once the watch's own app (Samsung Health, Fitbit, …) saves a finished night, its end time is recorded as when you woke up, even if the HeartLink watch never noticed. **Phone motion and light** (Android's Sleep API, needs physical activity access): its finished sleeps count the same way, and its 10-minute sleep guesses notice when you go back to sleep after getting up in the night (two readings of 85+ after 30 minutes without use, only for wakes within the first 6 hours of sleep). Checked every 10 minutes, only while the watch says asleep. |
+| **Update now** | A refresh button on the "Sharing your heartbeat" card asks the watch to measure live straight away (about 90 seconds), or shares the newest Health Connect reading when there's no HeartLink watch. |
 | **Firebase project** | Project `heartlink-3b45b`, Realtime Database in the US region, rules published, anonymous sign-in enabled. |
 
 ## Release checklist (for the current build)
 
-- [ ] Publish `firebase/database.rules.json` in the Firebase console again (it now allows `presence/{role}/watch`).
+- [ ] Publish `firebase/database.rules.json` in the Firebase console again (it now allows `presence/{role}/watch` and `presence/{role}/wokeAt`, lets a device remove its owner's other devices, refuses invites for the partner's seat, and allows `presence/{role}/sleep`, the verdict each phone publishes, `presence/{role}/movingAt` and `presence/{role}/callAt`).
 - [ ] Run the rules tests: `firebase emulators:start --only database`, then `npm install && npm test` in `firebase/rules-test/`.
 - [x] Check that Anonymous sign-in is enabled in Firebase Authentication.
 - [x] Re-pair both people after installing (new Firebase project).
@@ -75,6 +82,8 @@ Before starting any of this, finish the device checks under **Release checklist*
   - [ ] status changes to "no connection" within a minute or two of switching a phone off, and the timer counts up
   - [ ] status changes to away after an hour without using the phone
   - [ ] asleep shows after the watch detects sleep
+  - [ ] using the phone while asleep (night or nap) shows inactive, then asleep again after 30 minutes without use, or awake after 15 minutes of use (5 minutes after 6 hours of sleep)
+  - [ ] a normal morning (phone, shower, phone again) ends as awake, stays awake after an hour without the phone, and sends one "is awake" notification
   - [ ] messages and heartbeats arrive with HeartLink closed
   - [ ] battery levels update on both cards
   - [ ] the sharing indicator turns amber with a fix when the watch is disconnected
@@ -85,6 +94,17 @@ Before starting any of this, finish the device checks under **Release checklist*
   - [ ] haptic settings: Try it, and a received heartbeat on the watch, follow the chosen strength and length
   - [ ] arriving home posts "Home safe 🏠" (needs "Allow all the time" location)
   - [ ] wake/sleep notifications appear after the watch detects a change
+  - [ ] "Unlink this phone" also unlinks its watch (watch returns to setup; partner stops getting its readings)
+  - [ ] unlinking on the watch stays unlinked until "Link through phone" is tapped
+  - [ ] the partner opening HeartLink doesn't crash an unlinked watch, or one without heart-rate permission
+  - [ ] the "Send my heartbeat" notification button shows a "Heartbeat sent" toast
+  - [ ] with Sleep from Health Connect on, a night Samsung Health saves marks you awake from its end time, if the watch still said asleep
+  - [ ] with Phone motion and light on, getting up in the night and then sleeping again with the phone on the bedside table shows asleep again within about 30–40 minutes
+  - [ ] after a few nights with Health Connect sleep on, Settings shows "Checked N nights" with average errors
+  - [ ] a long phone call with the screen off keeps you online
+  - [ ] falling asleep on a Discord call still shows asleep, and heartbeats stay quiet during quiet hours
+  - [ ] walking around with the phone for over an hour without using it shows inactive, not away (with Phone motion and light on)
+  - [ ] the update button on "Sharing your heartbeat" turns it to "Live from your watch" within a minute
 
 ## Suggested order
 

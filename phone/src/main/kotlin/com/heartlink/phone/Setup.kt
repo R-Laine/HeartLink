@@ -40,6 +40,11 @@ import com.heartlink.shared.InviteCode
 import com.heartlink.shared.Names
 import com.heartlink.shared.Session
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.TimeUnit
+
+/** Offline, Firebase writes wait instead of failing; give up after this so setup isn't stuck. */
+private val SETUP_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(20)
 
 private sealed interface Step {
     data object Welcome : Step
@@ -67,7 +72,7 @@ fun SetupFlow(onDone: (Session) -> Unit) {
         error = null
         scope.launch {
             try {
-                block()
+                withTimeout(SETUP_TIMEOUT_MS) { block() }
             } catch (e: Exception) {
                 Log.w("SetupFlow", "Setup step failed", e)
                 error = "Something went wrong. Check your connection and try again."

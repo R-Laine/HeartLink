@@ -81,6 +81,14 @@ await check('invite with long expiry rejected', assertFails(set(ref(db('alice'),
 await check('alice sets own presence', assertSucceeds(update(ref(db('alice'), `couples/${C}/presence/a`), { connected: true, tz: 'Europe/London', lastSeen: serverTimestamp() })));
 await check('alice cannot set bob presence', assertFails(update(ref(db('alice'), `couples/${C}/presence/b`), { connected: true })));
 await check('alice watch reports asleep', assertSucceeds(update(ref(db('alicewatch'), `couples/${C}/presence/a`), { asleep: true, asleepAt: serverTimestamp() })));
+await check('alice phone reports moving', assertSucceeds(update(ref(db('alice'), `couples/${C}/presence/a`), { movingAt: serverTimestamp() })));
+await check('alice phone reports a call', assertSucceeds(update(ref(db('alice'), `couples/${C}/presence/a`), { callAt: serverTimestamp() })));
+await check('bob cannot report alice moving', assertFails(update(ref(db('bobphone2'), `couples/${C}/presence/a`), { movingAt: serverTimestamp() })));
+await check('alice phone publishes her sleep', assertSucceeds(set(ref(db('alice'), `couples/${C}/presence/a/sleep`), { state: 'wokeUp', reason: 'use', at: serverTimestamp(), since: Date.now() - 60000, basis: Date.now() - 3600000, lastUse: Date.now() })));
+await check('unknown sleep state rejected', assertFails(set(ref(db('alice'), `couples/${C}/presence/a/sleep`), { state: 'dreaming', reason: 'use', at: serverTimestamp() })));
+await check('sleep without reason rejected', assertFails(set(ref(db('alice'), `couples/${C}/presence/a/sleep`), { state: 'awake', at: serverTimestamp() })));
+await check('future sleep time rejected', assertFails(set(ref(db('alice'), `couples/${C}/presence/a/sleep`), { state: 'awake', reason: 'use', at: serverTimestamp(), since: Date.now() + 3600000 })));
+await check('bob cannot publish alice sleep', assertFails(set(ref(db('bobphone2'), `couples/${C}/presence/a/sleep`), { state: 'asleep', reason: 'use', at: serverTimestamp() })));
 await check('unknown presence field rejected', assertFails(update(ref(db('alice'), `couples/${C}/presence/a`), { foo: 1 })));
 await check('alice messages bob', assertSucceeds(set(ref(db('alice'), `couples/${C}/messages/b/m1`), { text: 'hi', ts: serverTimestamp(), from: 'Alice' })));
 await check('alice cannot message herself', assertFails(set(ref(db('alice'), `couples/${C}/messages/a/m2`), { text: 'hi', ts: serverTimestamp() })));
@@ -107,6 +115,20 @@ await check('quiet minute out of range rejected', assertFails(set(ref(db('alice'
 await check('member sets countdown', assertSucceeds(set(ref(db('bobphone2'), `couples/${C}/countdown`), { date: '2027-02-14' })));
 await check('bad countdown date rejected', assertFails(set(ref(db('alice'), `couples/${C}/countdown`), { date: 'soon' })));
 await check('stranger cannot set countdown', assertFails(set(ref(db('mallory'), `couples/${C}/countdown`), { date: '2027-02-14' })));
+
+// ---- invites only for your own seat (or the empty partner seat); unlinking removes your watch ----
+await check('bob cannot make an invite for alice\'s seat', assertFails(set(ref(db('bobphone2'), 'invites/HHHHHH'), { couple: C, role: 'a', expires: now + 900000, name: 'Alice' })));
+await check('bob can make an invite for his own seat', assertSucceeds(set(ref(db('bobphone2'), 'invites/JJJJJJ'), { couple: C, role: 'b', expires: now + 900000, name: 'Bob' })));
+await check('partner invite allowed while the seat is empty', (async () => {
+  const C3 = 'coupleZ';
+  await assertSucceeds(update(ref(db('dana')), {
+    [`couples/${C3}/devices/dana`]: { role: 'a' }, [`couples/${C3}/members/a/name`]: 'Dana',
+    [`couples/${C3}/pendingInvite`]: 'KKKKKK', [`invites/KKKKKK`]: { couple: C3, role: 'b', expires: now + DAY, from: 'Dana' },
+  }));
+})());
+await check('bob cannot remove alice\'s watch', assertFails(remove(ref(db('bobphone2'), `couples/${C}/devices/alicewatch`))));
+await check('alice unlinks her phone and watch together', assertSucceeds(update(ref(db('alice'), `couples/${C}/devices`), { alice: null, alicewatch: null })));
+await check('alice watch no longer reads', assertFails(get(ref(db('alicewatch'), `couples/${C}`))));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 await env.cleanup();

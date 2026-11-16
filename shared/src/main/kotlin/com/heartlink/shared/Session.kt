@@ -60,7 +60,7 @@ object Names {
     fun clean(input: String): String = input.trim().replace(Regex("\\s+"), " ").take(MAX_LENGTH)
 }
 
-/** Wear OS Data Layer message paths used to pair a watch through its phone. */
+/** Wear OS Data Layer message paths between a phone and its watch. */
 object WearPaths {
     const val PREFIX = "/heartlink"
 
@@ -78,6 +78,24 @@ object WearPaths {
 
     /** Phone → watch. The partner is looking right now; measure live for a while. */
     const val LIVE_REQUEST = "$PREFIX/live"
+
+    /**
+     * Phone → watch. The phone hasn't seen fresh data from this watch: re-check background
+     * monitoring, retry anything unsent, and reply with [SYNC_REPLY].
+     */
+    const val SYNC_REQUEST = "$PREFIX/sync"
+
+    /** Watch → phone. Payload: a [WatchReport] for the phone to upload. */
+    const val SYNC_REPLY = "$PREFIX/sync-reply"
+
+    /** Phone → watch. The phone uploaded the watch's waiting sleep change. Payload: its time as text. */
+    const val SLEEP_RELAYED = "$PREFIX/sleep-relayed"
+
+    /**
+     * Phone → watch. The phone was unlinked and has already removed this watch from the couple:
+     * forget the link here too, so the watch stops sharing.
+     */
+    const val UNLINK = "$PREFIX/unlink"
 
     fun encode(session: Session): ByteArray = "${session.coupleId}|${session.role}".toByteArray()
 

@@ -56,6 +56,8 @@ fun WatchSetup(note: String? = null, onDone: (Session) -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var done by remember { mutableStateOf(false) }
+    // After unlinking on purpose, wait to be asked rather than pairing straight back.
+    var paused by remember { mutableStateOf(Pairing.isPaused(context)) }
     val scope = rememberCoroutineScope()
 
     fun finish(session: Session) {
@@ -78,7 +80,8 @@ fun WatchSetup(note: String? = null, onDone: (Session) -> Unit) {
     }
 
     // Keep asking the phone until it answers with a session.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(paused) {
+        if (paused) return@LaunchedEffect
         val messages = Wearable.getMessageClient(context)
         val nodes = Wearable.getNodeClient(context)
         // After a refused link, pause so the screen doesn't flicker between setup and home.
@@ -135,18 +138,28 @@ fun WatchSetup(note: String? = null, onDone: (Session) -> Unit) {
         val current = invite
         if (current == null) {
             item { Text("HeartLink", fontSize = 18.sp) }
-            item { Text(status, color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center) }
-            item { CircularProgressIndicator() }
-            note?.let { text ->
-                item { Text(text, color = HeartLinkColors.Pink, fontSize = 10.sp, textAlign = TextAlign.Center) }
-            }
-            item {
-                Text(
-                    "Open HeartLink on your phone to link this watch automatically",
-                    color = Color.Gray,
-                    fontSize = 11.sp,
-                    textAlign = TextAlign.Center,
-                )
+            if (paused) {
+                item { Text("This watch is unlinked", color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center) }
+                item {
+                    SetupChip("Link through phone", HeartLinkColors.Pink, enabled = !busy) {
+                        Pairing.setPaused(context, false)
+                        paused = false
+                    }
+                }
+            } else {
+                item { Text(status, color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center) }
+                item { CircularProgressIndicator() }
+                note?.let { text ->
+                    item { Text(text, color = HeartLinkColors.Pink, fontSize = 10.sp, textAlign = TextAlign.Center) }
+                }
+                item {
+                    Text(
+                        "Open HeartLink on your phone to link this watch automatically",
+                        color = Color.Gray,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
             item { SetupChip("Use a code instead", Color.DarkGray, enabled = !busy, contentColor = Color.White, onClick = enterCode) }
         } else {

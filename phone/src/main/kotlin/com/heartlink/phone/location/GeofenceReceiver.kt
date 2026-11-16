@@ -25,13 +25,15 @@ class GeofenceReceiver : BroadcastReceiver() {
 
         val now = System.currentTimeMillis()
         if (now - Settings.lastHomeArrival(context) < CheckIns.HOME_COOLDOWN_MS) return
-        Settings.setLastHomeArrival(context, now)
 
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 withTimeout(20_000) {
                     HeartRepository.checkIn(session, CheckIns.HOME)
+                    // Recorded once the check-in is in, so a slow message isn't sent again (with
+                    // a second check-in) on the next arrival.
+                    Settings.setLastHomeArrival(context, now)
                     val myName = HeartRepository.observeMembers(session.coupleId).first()[session.role]
                     HeartRepository.sendMessage(session, "Got home safe 🏠", myName)
                 }

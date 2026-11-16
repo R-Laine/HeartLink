@@ -1,5 +1,6 @@
 package com.heartlink.phone
 
+import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.compose.animation.core.LinearEasing
@@ -27,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -74,8 +76,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.heartlink.phone.health.HealthConnectRow
+import com.heartlink.phone.health.HealthConnectSync
+import com.heartlink.phone.wear.WatchNodes
+import com.heartlink.shared.Identity
+import com.heartlink.shared.WearPaths
 import com.heartlink.shared.HeartLinkColors
 import com.heartlink.shared.HeartRepository
+import com.heartlink.shared.SendResult
 import com.heartlink.shared.LIVE_THRESHOLD_MS
 import com.heartlink.shared.PartnerStatus
 import com.heartlink.shared.PendingInvite
@@ -91,14 +98,13 @@ import com.heartlink.shared.beatPeriodMs
 import com.heartlink.shared.countdownText
 import com.heartlink.shared.heartbeatScale
 import com.heartlink.shared.isQuiet
+import com.heartlink.shared.isAsleep
 import com.heartlink.shared.statusLabel
 import com.heartlink.shared.localTimeText
 import com.heartlink.shared.partnerStatus
 import com.heartlink.shared.statusText
 import com.heartlink.shared.timeDifferenceText
-import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -144,10 +150,13 @@ fun PhoneApp(initialSession: Session?, onSessionChange: (Session?) -> Unit) {
         val current = session
         if (!denied || current == null) return@LaunchedEffect
         // One refused read isn't proof: only unlink if the database confirms this phone is gone.
-        when (HeartRepository.isStillLinked(current)) {
-            false -> update(null)
-            true -> HeartRepository.resetAccessDenied()
-            null -> Unit
+        // If it can't be checked (offline), keep checking, or the flag would never clear.
+        while (true) {
+            when (HeartRepository.isStillLinked(current)) {
+                false -> return@LaunchedEffect update(null)
+                true -> return@LaunchedEffect HeartRepository.resetAccessDenied()
+                null -> delay(LINK_RECHECK_MS)
+            }
         }
     }
 
@@ -166,6 +175,7 @@ fun PhoneApp(initialSession: Session?, onSessionChange: (Session?) -> Unit) {
 @Composable
 private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
     val id = session.coupleId
+    val context = LocalContext.current
     val members by remember(id) { HeartRepository.observeMembers(id) }
         .collectAsStateWithLifecycle(initialValue = emptyMap())
     val mine by remember(session) { HeartRepository.observeBeat(id, session.role) }
@@ -233,12 +243,11 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
     // Will things we send arrive silently right now?
     val partnerStatusNow = partnerStatus(partnerPresence, theirs, now)
     val partnerQuiet = partnerPresence?.let { p ->
-        val asleepAt = p.asleepAt
         isQuiet(
             quiet = p.quietHours,
             timeZone = p.timeZone,
             now = now,
-            asleep = p.asleep && asleepAt != null && now - asleepAt < StatusRules.ASLEEP_STALE_MS,
+            asleep = p.isAsleep(now),
             online = partnerStatusNow == PartnerStatus.Online,
         )
     } == true
@@ -310,7 +319,7 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
                 InviteCard(session, myName, now, Modifier.weight(1f))
             }
 
-            SharingStatus(reading = mine, now = now)
+            SharingStatus(session = session, reading = mine, now = now, onNote = ::note)
 
             if (partnerName != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -318,17 +327,17 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
                         onClick = {
                             scope.launch {
                                 val bpm = mine?.bpm ?: DEFAULT_BUZZ_BPM
-                                runCatching { HeartRepository.sendBuzz(session, bpm, myName) }
-                                    .onSuccess {
-                                        note(
-                                            if (partnerQuiet) {
-                                                "Sent quietly. $partnerName will see it when they check"
-                                            } else {
-                                                "Sent your heartbeat ($bpm bpm) to $partnerName"
-                                            },
-                                        )
-                                    }
-                                    .onFailure { note("Couldn't send. Check your connection.") }
+                                when (HeartRepository.trySend { HeartRepository.sendBuzz(session, bpm, myName) }) {
+                                    SendResult.Sent -> note(
+                                        if (partnerQuiet) {
+                                            "Sent quietly. $partnerName will see it when they check"
+                                        } else {
+                                            "Sent your heartbeat ($bpm bpm) to $partnerName"
+                                        },
+                                    )
+                                    SendResult.Queued -> note("No connection yet. It'll send when you're back online")
+                                    SendResult.Failed -> note("Couldn't send. Check your connection.")
+                                }
                             }
                         },
                         modifier = Modifier.weight(1f).height(56.dp),
@@ -364,9 +373,11 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
             partnerName = partnerName,
             onSend = { text ->
                 scope.launch {
-                    runCatching { HeartRepository.sendMessage(session, text, myName) }
-                        .onSuccess { note("Message sent") }
-                        .onFailure { note("Couldn't send. Check your connection.") }
+                    when (HeartRepository.trySend { HeartRepository.sendMessage(session, text, myName) }) {
+                        SendResult.Sent -> note("Message sent")
+                        SendResult.Queued -> note("No connection yet. It'll send when you're back online")
+                        SendResult.Failed -> note("Couldn't send. Check your connection.")
+                    }
                 }
                 showMessage = false
             },
@@ -384,17 +395,27 @@ private fun HeartsScreen(session: Session, onUnlinked: () -> Unit) {
             title = { Text("Unlink this phone?") },
             text = {
                 Text(
-                    "This phone will stop sharing and showing heartbeats. To link it again, use Add device " +
-                        "on your partner's phone or another of your devices to get a one-time code.",
+                    "This phone and the watch it set up will stop sharing and showing heartbeats. " +
+                        "To link again, start a new link, or use Add device on another of your phones.",
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     showUnlink = false
                     scope.launch {
-                        runCatching { HeartRepository.leave(session) }
-                            .onFailure { Log.w("HeartsScreen", "Couldn't remove device", it) }
-                        onUnlinked()
+                        note("Unlinking…")
+                        // Removes this phone and its watches in one write. Offline it would wait
+                        // forever, so give up instead and stay linked rather than half-unlinked.
+                        val watches = Identity.watches(context)
+                        when (HeartRepository.trySend { HeartRepository.leave(session, watches) }) {
+                            SendResult.Sent -> {
+                                // Already removed from the couple; this just tells the watch now.
+                                WatchNodes.send(context, WearPaths.UNLINK)
+                                onUnlinked()
+                            }
+                            SendResult.Queued, SendResult.Failed ->
+                                note("Couldn't unlink. Check your connection and try again.")
+                        }
                     }
                 }) { Text("Unlink") }
             },
@@ -471,7 +492,10 @@ private fun InviteCard(session: Session, myName: String?, now: Long, modifier: M
     }
 }
 
-/** One-time, 15-minute code for linking another phone or watch to either person's seat. */
+/**
+ * One-time, 15-minute code for linking another of this person's phones. Only for their own seat:
+ * the database refuses codes for the partner's seat, so nobody can add a device as the other.
+ */
 @Composable
 private fun AddDeviceDialog(session: Session, members: Map<String, String>, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -518,7 +542,7 @@ private fun AddDeviceDialog(session: Session, members: Map<String, String>, onDi
                     }
                     else -> {
                         Text(
-                            "Get a one-time code to link another phone, for example after reinstalling. " +
+                            "Get a one-time code to link another of your phones, for example after reinstalling. " +
                                 "Watches link automatically through their phone, so they don't need a code.",
                         )
                         if (failed) {
@@ -531,14 +555,7 @@ private fun AddDeviceDialog(session: Session, members: Map<String, String>, onDi
         },
         confirmButton = {
             if (code == null && !busy) {
-                Column(horizontalAlignment = Alignment.End) {
-                    members[session.role]?.let { me ->
-                        TextButton(onClick = { create(session.role) }) { Text("For me ($me)") }
-                    }
-                    members[session.partnerRole]?.let { partner ->
-                        TextButton(onClick = { create(session.partnerRole) }) { Text("For $partner") }
-                    }
-                }
+                TextButton(onClick = { create(session.role) }, enabled = members[session.role] != null) { Text("Get a code") }
             } else {
                 TextButton(onClick = onDismiss) { Text("Done") }
             }
@@ -685,15 +702,17 @@ private fun PartnerCard(
  * says why as best it can tell and what to do about it.
  */
 @Composable
-private fun SharingStatus(reading: Reading?, now: Long) {
+private fun SharingStatus(session: Session, reading: Reading?, now: Long, onNote: (String) -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // Spins from a tap until a new reading arrives (or we give up waiting).
+    var refreshing by remember { mutableStateOf(false) }
+    LaunchedEffect(reading?.timestamp) { refreshing = false }
     // null until checked, so we don't flash "watch not connected" on open.
     var watchConnected by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
-            watchConnected = runCatching {
-                Wearable.getNodeClient(context).connectedNodes.await().isNotEmpty()
-            }.getOrDefault(false)
+            watchConnected = runCatching { WatchNodes.reachable(context).isNotEmpty() }.getOrDefault(false)
             delay(30_000)
         }
     }
@@ -714,7 +733,7 @@ private fun SharingStatus(reading: Reading?, now: Long) {
             "Open your watch's or fitness tracker's own app so it syncs to Health Connect."
 
         watchConnected == false -> (if (reading == null) "Not sharing your heartbeat yet" else "Your heartbeat hasn't updated in ${ageText(age!!).removeSuffix(" ago")}") to
-            "No watch is connected to this phone. Check your watch is on, charged and connected over Bluetooth. " +
+            "No HeartLink watch is connected to this phone. Check your watch is on, charged and connected over Bluetooth. " +
             "No HeartLink watch? Share from Health Connect below."
 
         reading == null -> "Not sharing your heartbeat yet" to
@@ -741,23 +760,63 @@ private fun SharingStatus(reading: Reading?, now: Long) {
                 Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                 Text(detail, color = if (healthy) Color.Gray else Color(0xFFE6D3A8), fontSize = 13.sp)
             }
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                if (refreshing) {
+                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = Color.LightGray)
+                } else {
+                    IconButton(
+                        onClick = {
+                            refreshing = true
+                            scope.launch {
+                                val waiting = refreshMyHeartbeat(context, session, preferHealth = fromHealth, onNote)
+                                if (waiting) delay(REFRESH_WAIT_MS)
+                                refreshing = false
+                            }
+                        },
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Update now", tint = Color.LightGray)
+                    }
+                }
+            }
         }
     }
 }
 
+/**
+ * Asks for a fresh reading of this person's heartbeat: the watch measures live for a short
+ * while, or (with no HeartLink watch, or when sharing from Health Connect) the newest Health
+ * Connect sample is uploaded. Returns true if a reading should arrive shortly.
+ */
+private suspend fun refreshMyHeartbeat(
+    context: Context,
+    session: Session,
+    preferHealth: Boolean,
+    onNote: (String) -> Unit,
+): Boolean {
+    if (!preferHealth && WatchNodes.send(context, WearPaths.LIVE_REQUEST)) {
+        onNote("Asked your watch to measure now")
+        return true
+    }
+    val shared = runCatching { HealthConnectSync.syncOnce(context, session) }
+    when {
+        shared.getOrDefault(false) -> onNote("Updated from Health Connect")
+        shared.isSuccess && runCatching { HealthConnectSync.hasPermission(context) }.getOrDefault(false) ->
+            onNote("No newer reading in Health Connect")
+        else -> onNote("Couldn't reach your watch. Check it's on and connected over Bluetooth.")
+    }
+    return false
+}
+
 private val WATCH_STALE_MS = TimeUnit.MINUTES.toMillis(30)
+private val REFRESH_WAIT_MS = TimeUnit.SECONDS.toMillis(60)
+private val LINK_RECHECK_MS = TimeUnit.SECONDS.toMillis(30)
 private val HEALTH_STALE_MS = TimeUnit.HOURS.toMillis(3)
 
 @Composable
 private fun BeatingHeart(bpm: Int?, color: Color, size: Dp, dim: Boolean = false, glow: Boolean = true) {
-    val transition = rememberInfiniteTransition(label = "beat")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(beatPeriodMs(bpm), easing = LinearEasing)),
-        label = "progress",
-    )
-    val scale = if (bpm != null) heartbeatScale(progress) else 1f
+    // A still heart doesn't need a frame every 16 ms: only animate while there's a beat to show.
+    val scale = if (bpm != null) beatScale(bpm) else 1f
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(size)) {
         if (glow && bpm != null) {
             Box(
@@ -856,4 +915,17 @@ private fun Pill(text: String, color: Color = Color.LightGray, modifier: Modifie
             .background(ChipColor, RoundedCornerShape(50))
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+/** The heart's size right now, beating at [bpm]. */
+@Composable
+private fun beatScale(bpm: Int): Float {
+    val transition = rememberInfiniteTransition(label = "beat")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(beatPeriodMs(bpm), easing = LinearEasing)),
+        label = "progress",
+    )
+    return heartbeatScale(progress, beatPeriodMs(bpm))
 }

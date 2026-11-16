@@ -32,14 +32,24 @@ fun ageText(ms: Long): String {
 }
 
 /**
- * Scale for a heart that beats once per [progress] cycle (0..1): quick 30% swell
- * over the first 15%, settle back by 40%, then rest.
+ * Scale for a heart beating "lub-dub", like the vibration: a strong swell (lub), a short gap, a
+ * smaller swell (dub), then rest until the next beat. [progress] runs 0..1 over one beat of
+ * [periodMs]; the double pulse takes [LUB_DUB_MS] and is squeezed to fit faster beats.
  */
-fun heartbeatScale(progress: Float): Float = when {
-    progress < 0.15f -> 1f + (progress / 0.15f) * 0.3f
-    progress < 0.4f -> 1.3f - ((progress - 0.15f) / 0.25f) * 0.3f
-    else -> 1f
+fun heartbeatScale(progress: Float, periodMs: Int = 1000): Float {
+    val squeeze = (periodMs / LUB_DUB_MS).coerceAtMost(1f)
+    val t = progress * periodMs / squeeze // ms along the lub-dub
+    return when {
+        t < 70f -> 1f + t / 70f * 0.3f // lub swells
+        t < 180f -> 1.3f - (t - 70f) / 110f * 0.24f // eases back
+        t < 230f -> 1.06f + (t - 180f) / 50f * 0.12f // dub
+        t < LUB_DUB_MS -> 1.18f - (t - 230f) / (LUB_DUB_MS - 230f) * 0.18f // settles
+        else -> 1f
+    }
 }
+
+/** How long the animated lub-dub takes, before resting until the next beat. */
+private const val LUB_DUB_MS = 450f
 
 /** Duration of one beat in ms for [bpm], clamped to 250–2000 ms; 1 s when unknown. */
 fun beatPeriodMs(bpm: Int?): Int =

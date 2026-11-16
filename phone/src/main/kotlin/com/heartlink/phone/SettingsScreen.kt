@@ -48,7 +48,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.health.connect.client.PermissionController
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import com.heartlink.phone.health.HealthConnectSync
 import com.heartlink.phone.location.HomeArrival
+import com.heartlink.phone.sleep.NightJournal
+import com.heartlink.phone.sleep.SleepApi
+import com.heartlink.shared.SleepLearning
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.heartlink.phone.service.HeartLinkService
 import com.heartlink.phone.service.Settings
 import com.heartlink.shared.HeartLinkColors
@@ -90,6 +101,8 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
     fun saveQuiet(new: QuietHours) {
         quiet = new
         Settings.setQuietHours(context, new)
+        // Lets the service play held-back heartbeats straight away if it's no longer quiet.
+        HeartLinkService.start(context, HeartLinkService.ACTION_QUIET_CHANGED)
         scope.launch {
             runCatching { HeartRepository.reportQuietHours(session, new) }
                 .onFailure { Log.w("SettingsScreen", "Couldn't share quiet hours", it) }
@@ -108,6 +121,27 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
                 else -> "Home saved. $partner will be told when you get home."
             }
         }
+    }
+
+    var healthAvailability by remember { mutableStateOf(HealthConnectSync.availability(context)) }
+    var healthSleep by remember { mutableStateOf(false) }
+    var sleepApi by remember { mutableStateOf(SleepApi.hasPermission(context)) }
+    var sleepRefresh by remember { mutableIntStateOf(0) }
+    var learning by remember { mutableStateOf<NightJournal.Summary?>(null) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { sleepRefresh++ }
+    LaunchedEffect(sleepRefresh) {
+        healthAvailability = HealthConnectSync.availability(context)
+        healthSleep = runCatching { HealthConnectSync.hasSleepPermission(context) }.getOrDefault(false)
+        sleepApi = SleepApi.hasPermission(context)
+        learning = withContext(Dispatchers.Default) { runCatching { NightJournal.summary(context) }.getOrNull() }
+    }
+    val healthSleepLauncher = rememberLauncherForActivityResult(PermissionController.createRequestPermissionResultContract()) {
+        sleepRefresh++
+        HeartLinkService.start(context, HeartLinkService.ACTION_SLEEP_SOURCES_CHANGED)
+    }
+    val activityLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        sleepRefresh++
+        HeartLinkService.start(context, HeartLinkService.ACTION_SLEEP_SOURCES_CHANGED)
     }
 
     val backgroundLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -233,6 +267,60 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
             }
         }
 
+        Section("Sleep detection")
+        Detail(
+            "Your watch can be slow to notice you waking up, or miss it if it comes off to charge. " +
+                "These help $partner see when you're really up.",
+        )
+        SourceRow(
+            title = "Sleep from Health Connect",
+            detail = when {
+                healthAvailability == HealthConnectSync.Availability.Unsupported -> "Health Connect isn't available on this phone."
+                healthSleep -> "On. Uses the sleep your watch's own app (such as Samsung Health) saves, to know when you woke up. It can arrive a while after you wake."
+                else -> "Uses the sleep your watch's own app (such as Samsung Health) saves, to know when you woke up."
+            },
+            on = healthSleep,
+            action = when (healthAvailability) {
+                HealthConnectSync.Availability.Unsupported -> null
+                HealthConnectSync.Availability.NeedsInstall -> "Set up"
+                HealthConnectSync.Availability.Available -> "Allow"
+            },
+        ) {
+            if (healthAvailability == HealthConnectSync.Availability.NeedsInstall) {
+                runCatching { context.startActivity(HealthConnectSync.installIntent()) }
+                    .onFailure { Log.w("SettingsScreen", "Play Store not available", it) }
+            } else {
+                healthSleepLauncher.launch(HealthConnectSync.sleepPermissionsToRequest(context))
+            }
+        }
+        SourceRow(
+            title = "Phone motion and light",
+            detail = if (sleepApi) {
+                "On. Android's sleep detection on this phone notices when you wake up, and when you go back to sleep after getting up in the night. It also notices when you're out and about, so you show as inactive rather than away."
+            } else {
+                "Android's sleep detection on this phone notices when you wake up, and when you go back to sleep after getting up in the night. It also notices when you're out and about, so you show as inactive rather than away. Needs physical activity access."
+            },
+            on = sleepApi,
+            action = "Allow",
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                activityLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+            }
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Label("Learning your sleep")
+                Detail(learningText(learning))
+            }
+            if ((learning?.nights ?: 0) > 0) {
+                TextButton(onClick = {
+                    NightJournal.clear(context)
+                    sleepRefresh++
+                }) { Text("Reset") }
+            }
+        }
+
         Section("Background")
         Toggle(
             title = "Stay connected in the background",
@@ -254,7 +342,15 @@ fun SettingsScreen(session: Session, partnerName: String?, onSendTestBeat: () ->
             HeartLinkService.start(context, HeartLinkService.ACTION_REFRESH)
         }
         TextButton(onClick = {
-            context.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            // Some phones don't have this screen; fall back to the app's own settings.
+            runCatching {
+                context.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }.recoverCatching {
+                context.startActivity(
+                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        .setData(android.net.Uri.fromParts("package", context.packageName, null)),
+                )
+            }.onFailure { Log.w("SettingsScreen", "No battery settings screen", it) }
         }) { Text("Battery settings (if HeartLink keeps disconnecting)") }
 
         HorizontalDivider(color = Color.DarkGray)
@@ -345,6 +441,37 @@ private fun <T> Choices(options: List<T>, selected: T, label: (T) -> String, onS
                 onClick = { onSelect(option) },
                 shape = SegmentedButtonDefaults.itemShape(index, options.size),
             ) { Text(label(option), maxLines = 1) }
+        }
+    }
+}
+
+private fun learningText(summary: NightJournal.Summary?): String {
+    fun minutes(ms: Long?) = "${(ms ?: 0L) / 60_000} min"
+    return when {
+        summary == null || summary.nights == 0 ->
+            "Once Health Connect or Android's sleep detection records a night, HeartLink checks when it guessed you woke " +
+                "against it, and adjusts to you. Everything stays on this phone."
+        summary.nights < SleepLearning.MIN_NIGHTS ->
+            "Checked ${summary.nights} of ${SleepLearning.MIN_NIGHTS} nights before it starts adjusting to you. " +
+                "Off by ${minutes(summary.averageError)} on average so far."
+        else ->
+            "Checked ${summary.nights} nights. Wake-up guesses are off by ${minutes(summary.averageError)} on average " +
+                "(${minutes(summary.defaultError)} with the starting settings). Stays on this phone."
+    }
+}
+
+/** A sleep source: "On" once allowed, otherwise a button ([action]) to turn it on, if possible. */
+@Composable
+private fun SourceRow(title: String, detail: String, on: Boolean, action: String?, onClick: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f)) {
+            Label(title)
+            Detail(detail)
+        }
+        Spacer(Modifier.width(12.dp))
+        when {
+            on -> Text("On", color = HeartLinkColors.Pink, fontWeight = FontWeight.SemiBold)
+            action != null -> TextButton(onClick = onClick) { Text(action) }
         }
     }
 }

@@ -8,6 +8,7 @@ object Identity {
     // "couple_id" rather than "couple": sessions from older builds stored a share code here and must re-link.
     private const val KEY_COUPLE = "couple_id"
     private const val KEY_ROLE = "role"
+    private const val KEY_WATCHES = "watches"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -23,6 +24,18 @@ object Identity {
             .putString(KEY_COUPLE, session.coupleId)
             .putString(KEY_ROLE, session.role)
             .apply()
+    }
+
+    /**
+     * Firebase user IDs of the watches this phone let into the couple, so unlinking the phone can
+     * remove them too. Kept with the session, so unlinking forgets them.
+     */
+    fun watches(ctx: Context): Set<String> = prefs(ctx).getStringSet(KEY_WATCHES, null).orEmpty().toSet()
+
+    fun addWatch(ctx: Context, uid: String) {
+        val current = watches(ctx)
+        if (uid in current) return
+        prefs(ctx).edit().putStringSet(KEY_WATCHES, current + uid).apply()
     }
 
     fun clear(ctx: Context) {

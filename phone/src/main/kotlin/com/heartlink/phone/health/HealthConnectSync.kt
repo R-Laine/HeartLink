@@ -8,6 +8,8 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
+import androidx.health.connect.client.records.SleepSessionRecord
+import com.heartlink.shared.FinishedSleep
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import com.heartlink.shared.HeartRepository
@@ -32,6 +34,7 @@ object HealthConnectSync {
     private const val KEY_LAST_SYNCED = "hc_last_synced_ts"
 
     val HEART_RATE_PERMISSION = HealthPermission.getReadPermission(HeartRateRecord::class)
+    val SLEEP_PERMISSION = HealthPermission.getReadPermission(SleepSessionRecord::class)
 
     enum class Availability { Available, NeedsInstall, Unsupported }
 
@@ -49,6 +52,37 @@ object HealthConnectSync {
             .putExtra("overlay", true)
 
     private fun client(ctx: Context) = HealthConnectClient.getOrCreate(ctx)
+
+    /**
+     * Sleep sessions, plus background reading where supported, so HeartLink knows when you woke up
+     * even if the watch never noticed.
+     */
+    fun sleepPermissionsToRequest(ctx: Context): Set<String> =
+        permissionsToRequest(ctx) - HEART_RATE_PERMISSION + SLEEP_PERMISSION
+
+    suspend fun hasSleepPermission(ctx: Context): Boolean =
+        availability(ctx) == Availability.Available &&
+            SLEEP_PERMISSION in client(ctx).permissionController.getGrantedPermissions()
+
+    /**
+     * The sleeps another app (Samsung Health, Fitbit, …) saved in the last day, oldest first. Those
+     * apps save a night once it's over, which can be a while after waking, and some split a night
+     * in two around a wake in the middle, so all of them go to the sleep model.
+     */
+    suspend fun recentSleeps(ctx: Context): List<FinishedSleep> {
+        if (!hasSleepPermission(ctx)) return emptyList()
+        val response = client(ctx).readRecords(
+            ReadRecordsRequest(
+                recordType = SleepSessionRecord::class,
+                timeRangeFilter = TimeRangeFilter.after(Instant.now().minus(LOOKBACK)),
+                ascendingOrder = false,
+                pageSize = 10,
+            ),
+        )
+        return response.records
+            .map { FinishedSleep(it.startTime.toEpochMilli(), it.endTime.toEpochMilli()) }
+            .sortedBy { it.start }
+    }
 
     /** Heart rate, plus background reading where this device's Health Connect supports it. */
     fun permissionsToRequest(ctx: Context): Set<String> = buildSet {

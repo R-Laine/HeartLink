@@ -74,9 +74,11 @@ object Notifications {
     }
 
     /** [localOnly] when the watch is vibrating it, so the watch doesn't also get a copy. */
-    fun showHeartbeat(ctx: Context, fromName: String?, bpm: Int, localOnly: Boolean, quiet: Boolean = false) {
+    /** [sentAt] shows when it was sent, for one that arrived too late to play. */
+    fun showHeartbeat(ctx: Context, fromName: String?, bpm: Int, localOnly: Boolean, quiet: Boolean = false, sentAt: Long? = null) {
         val notification = NotificationCompat.Builder(ctx, if (quiet) CHANNEL_QUIET else CHANNEL_HEARTBEATS)
             .setSmallIcon(R.drawable.ic_heart)
+            .apply { if (sentAt != null) setWhen(sentAt).setShowWhen(true) }
             .setContentTitle("${fromName ?: "Your partner"} sent you their heartbeat")
             .setContentText("$bpm bpm 💓")
             .setContentIntent(openAppIntent(ctx))

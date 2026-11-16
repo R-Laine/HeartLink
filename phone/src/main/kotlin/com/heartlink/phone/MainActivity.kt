@@ -11,6 +11,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import com.heartlink.phone.health.HealthConnectSync
 import com.heartlink.phone.health.HealthSyncWorker
+import com.heartlink.phone.activity.Motion
+import com.heartlink.phone.sleep.NightJournal
+import com.heartlink.phone.sleep.SleepApi
 import com.heartlink.phone.location.HomeArrival
 import com.heartlink.phone.service.HeartLinkService
 import com.heartlink.shared.Battery
@@ -40,6 +43,9 @@ class MainActivity : ComponentActivity() {
                     } else {
                         HeartLinkService.stop(this)
                         HealthSyncWorker.cancel(this)
+                        SleepApi.unregister(this)
+                        Motion.unregister(this)
+                        NightJournal.clear(this)
                         HomeArrival.clear(this)
                         Battery.reset(this)
                         Identity.clear(this)

@@ -1,13 +1,11 @@
 package com.heartlink.app
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -49,6 +47,7 @@ class LiveHeartService : Service() {
             val value = data.getData(DataType.HEART_RATE_BPM).lastOrNull()?.value ?: return
             if (value <= 0.0) return
             val session = Identity.get(this@LiveHeartService) ?: return
+            SleepReport.recordReading(this@LiveHeartService, value.roundToInt())
             scope.launch { HeartRepository.upload(session, value.roundToInt()) }
         }
     }
@@ -56,19 +55,34 @@ class LiveHeartService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (Identity.get(this) == null || checkSelfPermission(Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+        // Started with startForegroundService(), so startForeground() must come first: a service
+        // that stops without it crashes the app. [request] checks the link and permission before
+        // starting, so stopping below only happens if they changed in between.
+        try {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH else 0,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't go to the foreground", e)
             stopSelf()
             return START_NOT_STICKY
         }
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH else 0,
-        )
+        if (!canMeasure(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (!measuring) {
-            HealthServices.getClient(this).measureClient.registerMeasureCallback(DataType.HEART_RATE_BPM, callback)
-            measuring = true
+            try {
+                HealthServices.getClient(this).measureClient.registerMeasureCallback(DataType.HEART_RATE_BPM, callback)
+                measuring = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't start live heart rate", e)
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         stopJob?.cancel()
         stopJob = scope.launch {
@@ -105,7 +119,16 @@ class LiveHeartService : Service() {
         private const val NOTIFICATION_ID = 10
         private const val WINDOW_MS = 90_000L
 
+        /**
+         * Linked, and allowed to read heart rate. Wear OS 6 grants READ_HEART_RATE instead of
+         * BODY_SENSORS: checking only BODY_SENSORS meant live readings never started there.
+         */
+        private fun canMeasure(ctx: Context) = Identity.get(ctx) != null && BackgroundSetup.hasHeartRate(ctx)
+
         fun request(ctx: Context) {
+            // Checked before asking Android, not in the service: once started this way, the
+            // service can't stop without going to the foreground first, or the app crashes.
+            if (!canMeasure(ctx)) return
             try {
                 ContextCompat.startForegroundService(ctx, Intent(ctx, LiveHeartService::class.java))
             } catch (e: Exception) {
